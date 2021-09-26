@@ -2,7 +2,7 @@ import {miscUtils, structUtils, formatUtils, Descriptor, LocatorHash}           
 import {FetchResult, Locator, Package}                                                                       from '@yarnpkg/core';
 import {Linker, LinkOptions, MinimalLinkOptions, Manifest, MessageName, DependencyMeta, LinkType, Installer} from '@yarnpkg/core';
 import {CwdFS, PortablePath, VirtualFS, npath, ppath, xfs, Filename}                                         from '@yarnpkg/fslib';
-import {generateInlinedScript, generateSplitScript, PackageRegistry, PnpSettings}                            from '@yarnpkg/pnp';
+import {generateInlinedScript, generateSplitScript, PackageRegistry, PnpApi, PnpSettings}                    from '@yarnpkg/pnp';
 import {UsageError}                                                                                          from 'clipanion';
 
 import {getPnpPath}                                                                                          from './index';
@@ -22,6 +22,8 @@ const FORCED_UNPLUG_PACKAGES = new Set([
 export class PnpLinker implements Linker {
   protected mode = `strict`;
 
+  private pnpCache: Map<string, PnpApi> = new Map();
+
   supportsPackage(pkg: Package, opts: MinimalLinkOptions) {
     if (opts.project.configuration.get(`nodeLinker`) !== `pnp`)
       return false;
@@ -37,7 +39,9 @@ export class PnpLinker implements Linker {
     if (!xfs.existsSync(pnpPath))
       throw new UsageError(`The project in ${formatUtils.pretty(opts.project.configuration, `${opts.project.cwd}/package.json`, formatUtils.Type.PATH)} doesn't seem to have been installed - running an install there might help`);
 
-    const pnpFile = miscUtils.dynamicRequireNoCache(pnpPath);
+    const pnpFile = miscUtils.getFactoryWithDefault(this.pnpCache, pnpPath, () => {
+      return miscUtils.dynamicRequire(pnpPath, {cachingStrategy: miscUtils.CachingStrategy.FsTime});
+    });
 
     const packageLocator = {name: structUtils.stringifyIdent(locator), reference: locator.reference};
     const packageInformation = pnpFile.getPackageInformation(packageLocator);
@@ -53,7 +57,10 @@ export class PnpLinker implements Linker {
     if (!xfs.existsSync(pnpPath))
       return null;
 
-    const pnpFile = miscUtils.dynamicRequireNoCache(pnpPath);
+    const pnpFile = miscUtils.getFactoryWithDefault(this.pnpCache, pnpPath, () => {
+      return miscUtils.dynamicRequire(pnpPath, {cachingStrategy: miscUtils.CachingStrategy.FsTime});
+    });
+
     const locator = pnpFile.findPackageLocator(npath.fromPortablePath(location));
     if (!locator)
       return null;
@@ -101,14 +108,14 @@ export class PnpInstaller implements Installer {
     const key1 = structUtils.stringifyIdent(pkg);
     const key2 = pkg.reference;
 
-    const isWorkspace =
-      !!this.opts.project.tryWorkspaceByLocator(pkg);
+    const isWorkspace = !!this.opts.project.tryWorkspaceByLocator(pkg);
+    const isVirtual = structUtils.isVirtualLocator(pkg);
 
     const hasVirtualInstances =
       // Only packages with peer dependencies have virtual instances
       pkg.peerDependencies.size > 0 &&
       // Only packages with peer dependencies have virtual instances
-      !structUtils.isVirtualLocator(pkg);
+      !isVirtual;
 
     const mayNeedToBeBuilt =
       // Virtual instance templates don't need to be built, since they don't truly exist
@@ -122,22 +129,29 @@ export class PnpInstaller implements Installer {
       // We never need to unplug soft links, since we don't control them
       pkg.linkType !== LinkType.SOFT;
 
-    let customPackageData = this.customData.store.get(pkg.locatorHash);
-    if (typeof customPackageData === `undefined`) {
-      customPackageData = await extractCustomPackageData(pkg, fetchResult);
-      if (pkg.linkType === LinkType.HARD) {
-        this.customData.store.set(pkg.locatorHash, customPackageData);
+    let customPackageData: CustomPackageData | undefined;
+    let dependencyMeta: DependencyMeta | undefined;
+
+    if (mayNeedToBeBuilt || mayNeedToBeUnplugged) {
+      const devirtualizedLocator: Locator = isVirtual ? structUtils.devirtualizeLocator(pkg) : pkg;
+      customPackageData = this.customData.store.get(devirtualizedLocator.locatorHash);
+
+      if (typeof customPackageData === `undefined`) {
+        customPackageData = await extractCustomPackageData(fetchResult);
+        if (pkg.linkType === LinkType.HARD) {
+          this.customData.store.set(devirtualizedLocator.locatorHash, customPackageData);
+        }
       }
+
+      dependencyMeta = this.opts.project.getDependencyMeta(devirtualizedLocator, pkg.version);
     }
 
-    const dependencyMeta = this.opts.project.getDependencyMeta(pkg, pkg.version);
-
     const buildScripts = mayNeedToBeBuilt
-      ? jsInstallUtils.extractBuildScripts(pkg, customPackageData, dependencyMeta, {configuration: this.opts.project.configuration, report: this.opts.report})
+      ? jsInstallUtils.extractBuildScripts(pkg, customPackageData!, dependencyMeta!, {configuration: this.opts.project.configuration, report: this.opts.report})
       : [];
 
     const packageFs = mayNeedToBeUnplugged
-      ? await this.unplugPackageIfNeeded(pkg, customPackageData, fetchResult, dependencyMeta)
+      ? await this.unplugPackageIfNeeded(pkg, customPackageData!, fetchResult, dependencyMeta!)
       : fetchResult.packageFs;
 
     if (ppath.isAbsolute(fetchResult.prefixPath))
@@ -153,13 +167,13 @@ export class PnpInstaller implements Installer {
     // workspaces are a special case because the original packages are kept in
     // the dependency tree even after being virtualized; so in their case we
     // just ignore their declared peer dependencies.
-    if (structUtils.isVirtualLocator(pkg)) {
+    if (isVirtual) {
       for (const descriptor of pkg.peerDependencies.values()) {
         packageDependencies.set(structUtils.stringifyIdent(descriptor), null);
         packagePeers.add(structUtils.stringifyIdent(descriptor));
       }
 
-      if (!this.opts.project.tryWorkspaceByLocator(pkg)) {
+      if (!isWorkspace) {
         const devirtualized = structUtils.devirtualizeLocator(pkg);
         this.virtualTemplates.set(devirtualized.locatorHash, {
           location: normalizeDirectoryPath(this.opts.project.cwd, VirtualFS.resolveVirtual(packageRawLocation)),
@@ -204,6 +218,24 @@ export class PnpInstaller implements Installer {
 
 
   async finalizeInstall() {
+    if (this.opts.project.configuration.get(`pnpMode`) !== this.mode)
+      return undefined;
+
+    const pnpPath = getPnpPath(this.opts.project);
+
+    if (xfs.existsSync(pnpPath.cjsLegacy)) {
+      this.opts.report.reportWarning(MessageName.UNNAMED, `Removing the old ${formatUtils.pretty(this.opts.project.configuration, Filename.pnpJs, formatUtils.Type.PATH)} file. You might need to manually update existing references to reference the new ${formatUtils.pretty(this.opts.project.configuration, Filename.pnpCjs, formatUtils.Type.PATH)} file. If you use Editor SDKs, you'll have to rerun ${formatUtils.pretty(this.opts.project.configuration, `yarn sdks`, formatUtils.Type.CODE)}.`);
+
+      await xfs.removePromise(pnpPath.cjsLegacy);
+    }
+
+    if (this.opts.project.configuration.get(`nodeLinker`) !== `pnp`) {
+      await xfs.removePromise(pnpPath.cjs);
+      await xfs.removePromise(this.opts.project.configuration.get(`pnpDataPath`));
+
+      return undefined;
+    }
+
     for (const {locator, location} of this.virtualTemplates.values()) {
       miscUtils.getMapWithDefault(this.packageRegistry, structUtils.stringifyIdent(locator)).set(locator.reference, {
         packageLocation: location,
@@ -253,24 +285,8 @@ export class PnpInstaller implements Installer {
   }
 
   async finalizeInstallWithPnp(pnpSettings: PnpSettings) {
-    if (this.opts.project.configuration.get(`pnpMode`) !== this.mode)
-      return;
-
     const pnpPath = getPnpPath(this.opts.project);
     const pnpDataPath = this.opts.project.configuration.get(`pnpDataPath`);
-
-    if (xfs.existsSync(pnpPath.cjsLegacy)) {
-      this.opts.report.reportWarning(MessageName.UNNAMED, `Removing the old ${formatUtils.pretty(this.opts.project.configuration, Filename.pnpJs, formatUtils.Type.PATH)} file. You might need to manually update existing references to reference the new ${formatUtils.pretty(this.opts.project.configuration, Filename.pnpCjs, formatUtils.Type.PATH)} file. If you use PnPify SDKs, you'll have to rerun ${formatUtils.pretty(this.opts.project.configuration, `yarn pnpify --sdk`, formatUtils.Type.CODE)}.`);
-
-      await xfs.removePromise(pnpPath.cjsLegacy);
-    }
-
-    if (this.opts.project.configuration.get(`nodeLinker`) !== `pnp`) {
-      await xfs.removePromise(pnpPath.cjs);
-      await xfs.removePromise(pnpDataPath);
-
-      return;
-    }
 
     const nodeModules = await this.locateNodeModules(pnpSettings.ignorePattern);
     if (nodeModules.length > 0) {
@@ -285,19 +301,25 @@ export class PnpInstaller implements Installer {
     if (this.opts.project.configuration.get(`pnpEnableInlining`)) {
       const loaderFile = generateInlinedScript(pnpSettings);
 
-      await xfs.changeFilePromise(pnpPath.cjs, loaderFile, {automaticNewlines: true});
-      await xfs.chmodPromise(pnpPath.cjs, 0o755);
+      await xfs.changeFilePromise(pnpPath.cjs, loaderFile, {
+        automaticNewlines: true,
+        mode: 0o755,
+      });
 
       await xfs.removePromise(pnpDataPath);
     } else {
       const dataLocation = ppath.relative(ppath.dirname(pnpPath.cjs), pnpDataPath);
       const {dataFile, loaderFile} = generateSplitScript({...pnpSettings, dataLocation});
 
-      await xfs.changeFilePromise(pnpPath.cjs, loaderFile, {automaticNewlines: true});
-      await xfs.chmodPromise(pnpPath.cjs, 0o755);
+      await xfs.changeFilePromise(pnpPath.cjs, loaderFile, {
+        automaticNewlines: true,
+        mode: 0o755,
+      });
 
-      await xfs.changeFilePromise(pnpDataPath, dataFile, {automaticNewlines: true});
-      await xfs.chmodPromise(pnpDataPath, 0o644);
+      await xfs.changeFilePromise(pnpDataPath, dataFile, {
+        automaticNewlines: true,
+        mode: 0o644,
+      });
     }
 
     const pnpUnpluggedFolder = this.opts.project.configuration.get(`pnpUnpluggedFolder`);
@@ -376,6 +398,10 @@ export class PnpInstaller implements Installer {
     if (await xfs.existsPromise(readyFile))
       return new CwdFS(unplugPath);
 
+    // Delete any build state for the locator so it can run anew, this allows users
+    // to remove `.yarn/unplugged` and have the builds run again
+    this.opts.project.storedBuildState.delete(locator.locatorHash);
+
     await xfs.mkdirPromise(unplugPath, {recursive: true});
     await xfs.copyPromise(unplugPath, PortablePath.dot, {baseFs: fetchResult.packageFs, overwrite: false});
 
@@ -426,7 +452,7 @@ function normalizeDirectoryPath(root: PortablePath, folder: PortablePath) {
 type UnboxPromise<T extends Promise<any>> = T extends Promise<infer U> ? U: never;
 type CustomPackageData = UnboxPromise<ReturnType<typeof extractCustomPackageData>>;
 
-async function extractCustomPackageData(pkg: Package, fetchResult: FetchResult) {
+async function extractCustomPackageData(fetchResult: FetchResult) {
   const manifest = await Manifest.tryFind(fetchResult.prefixPath, {baseFs: fetchResult.packageFs}) ?? new Manifest();
 
   const preservedScripts = new Set([`preinstall`, `install`, `postinstall`]);

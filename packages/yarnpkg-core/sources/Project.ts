@@ -1,5 +1,5 @@
-import {PortablePath, ppath, xfs, normalizeLineEndings, Filename}       from '@yarnpkg/fslib';
 import {npath}                                                          from '@yarnpkg/fslib';
+import {PortablePath, ppath, xfs, normalizeLineEndings, Filename}       from '@yarnpkg/fslib';
 import {parseSyml, stringifySyml}                                       from '@yarnpkg/parsers';
 import {UsageError}                                                     from 'clipanion';
 import {createHash}                                                     from 'crypto';
@@ -14,7 +14,7 @@ import zlib                                                             from 'zl
 import {Cache}                                                          from './Cache';
 import {Configuration}                                                  from './Configuration';
 import {Fetcher}                                                        from './Fetcher';
-import {Installer, BuildDirective, BuildType}                           from './Installer';
+import {Installer, BuildDirective, BuildType, InstallStatus}            from './Installer';
 import {LegacyMigrationResolver}                                        from './LegacyMigrationResolver';
 import {Linker}                                                         from './Linker';
 import {LockfileResolver}                                               from './LockfileResolver';
@@ -25,6 +25,7 @@ import {Report, ReportError}                                            from './
 import {ResolveOptions, Resolver}                                       from './Resolver';
 import {RunInstallPleaseResolver}                                       from './RunInstallPleaseResolver';
 import {ThrowReport}                                                    from './ThrowReport';
+import {WorkspaceResolver}                                              from './WorkspaceResolver';
 import {Workspace}                                                      from './Workspace';
 import {isFolderInside}                                                 from './folderUtils';
 import * as formatUtils                                                 from './formatUtils';
@@ -33,9 +34,9 @@ import * as miscUtils                                                   from './
 import * as scriptUtils                                                 from './scriptUtils';
 import * as semverUtils                                                 from './semverUtils';
 import * as structUtils                                                 from './structUtils';
-import {IdentHash, DescriptorHash, LocatorHash, PackageExtensionStatus} from './types';
-import {Descriptor, Ident, Locator, Package}                            from './types';
 import {LinkType}                                                       from './types';
+import {Descriptor, Ident, Locator, Package}                            from './types';
+import {IdentHash, DescriptorHash, LocatorHash, PackageExtensionStatus} from './types';
 
 // When upgraded, the lockfile entries have to be resolved again (but the specific
 // versions are still pinned, no worry). Bump it when you change the fields within
@@ -54,6 +55,19 @@ const FETCHER_CONCURRENCY = 32;
 
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
+
+export enum InstallMode {
+  /**
+   * Doesn't run the link step, and only fetches what's necessary to compute
+   * an updated lockfile.
+   */
+  UpdateLockfile = `update-lockfile`,
+
+  /**
+   * Don't run the build scripts.
+   */
+  SkipBuild = `skip-build`,
+}
 
 export type InstallOptions = {
   /**
@@ -99,17 +113,21 @@ export type InstallOptions = {
   lockfileOnly?: boolean,
 
   /**
+   * Changes which artifacts are generated during the install. Check the
+   * enumeration documentation for details.
+   */
+  mode?: InstallMode,
+
+  /**
    * If true (the default), Yarn will update the workspace manifests once the
    * install has completed.
    */
   persistProject?: boolean,
 
   /**
-   * If true, Yarn will skip the build step during the install. Contrary to
-   * setting the `enableScripts` setting to false, setting this won't cause
-   * the generated artifacts to change.
+   * @deprecated Use `mode=skip-build`
    */
-  skipBuild?: boolean,
+  skipBuild?: never,
 };
 
 const INSTALL_STATE_FIELDS = {
@@ -124,6 +142,10 @@ const INSTALL_STATE_FIELDS = {
     `storedResolutions`,
     `storedPackages`,
     `lockFileChecksum`,
+  ] as const,
+
+  restoreBuildState: [
+    `storedBuildState`,
   ] as const,
 };
 
@@ -166,6 +188,7 @@ export class Project {
   public storedDescriptors: Map<DescriptorHash, Descriptor> = new Map();
   public storedPackages: Map<LocatorHash, Package> = new Map();
   public storedChecksums: Map<LocatorHash, string> = new Map();
+  public storedBuildState: Map<LocatorHash, string> = new Map();
 
   public accessibleLocators: Set<LocatorHash> = new Set();
   public originalPackages: Map<LocatorHash, Package> = new Map();
@@ -179,9 +202,18 @@ export class Project {
    */
   public peerRequirements: Map<string, PeerRequirement> = new Map();
 
+  /**
+   * Contains whatever data the installers (cf `Linker.ts`) want to persist
+   * from an install to another.
+   */
   public installersCustomData: Map<string, unknown> = new Map();
 
+  /**
+   * Those checksums are used to detect whether the relevant files actually
+   * changed since we last read them (to skip part of their generation).
+   */
   public lockFileChecksum: string | null = null;
+  public installStateChecksum: string | null = null;
 
   static async find(configuration: Configuration, startingCwd: PortablePath): Promise<{project: Project, workspace: Workspace | null, locator: Locator}> {
     if (!configuration.projectCwd)
@@ -225,28 +257,6 @@ export class Project {
       return {project, locator, workspace: null};
 
     throw new UsageError(`The nearest package directory (${formatUtils.pretty(configuration, packageCwd, formatUtils.Type.PATH)}) doesn't seem to be part of the project declared in ${formatUtils.pretty(configuration, project.cwd, formatUtils.Type.PATH)}.\n\n- If the project directory is right, it might be that you forgot to list ${formatUtils.pretty(configuration, ppath.relative(project.cwd, packageCwd), formatUtils.Type.PATH)} as a workspace.\n- If it isn't, it's likely because you have a yarn.lock or package.json file there, confusing the project root detection.`);
-  }
-
-  static generateBuildStateFile(buildState: Map<LocatorHash, string>, locatorStore: Map<LocatorHash, Locator>) {
-    let bstateFile = `# Warning: This file is automatically generated. Removing it is fine, but will\n# cause all your builds to become invalidated.\n`;
-
-    const bstateData = [...buildState].map(([locatorHash, hash]) => {
-      const locator = locatorStore.get(locatorHash);
-
-      if (typeof locator === `undefined`)
-        throw new Error(`Assertion failed: The locator should have been registered`);
-
-      return [structUtils.stringifyLocator(locator), locator.locatorHash, hash];
-    });
-
-    for (const [locatorString, locatorHash, buildHash] of miscUtils.sortMap(bstateData, [d => d[0], d => d[1]])) {
-      bstateFile += `\n`;
-      bstateFile += `# ${locatorString}\n`;
-      bstateFile += `${JSON.stringify(locatorHash)}:\n`;
-      bstateFile += `  ${buildHash}\n`;
-    }
-
-    return bstateFile;
   }
 
   constructor(projectCwd: PortablePath, {configuration}: {configuration: Configuration}) {
@@ -463,8 +473,13 @@ export class Project {
 
   tryWorkspaceByDescriptor(descriptor: Descriptor) {
     const workspace = this.tryWorkspaceByIdent(descriptor);
+    if (workspace === null)
+      return null;
 
-    if (workspace === null || !workspace.accepts(descriptor.range))
+    if (structUtils.isVirtualDescriptor(descriptor))
+      descriptor = structUtils.devirtualizeDescriptor(descriptor);
+
+    if (!workspace.accepts(descriptor.range))
       return null;
 
     return workspace;
@@ -480,11 +495,14 @@ export class Project {
   }
 
   tryWorkspaceByLocator(locator: Locator) {
+    const workspace = this.tryWorkspaceByIdent(locator);
+    if (workspace === null)
+      return null;
+
     if (structUtils.isVirtualLocator(locator))
       locator = structUtils.devirtualizeLocator(locator);
 
-    const workspace = this.tryWorkspaceByIdent(locator);
-    if (workspace === null || (workspace.locator.locatorHash !== locator.locatorHash && workspace.anchoredLocator.locatorHash !== locator.locatorHash))
+    if (workspace.locator.locatorHash !== locator.locatorHash && workspace.anchoredLocator.locatorHash !== locator.locatorHash)
       return null;
 
     return workspace;
@@ -625,7 +643,7 @@ export class Project {
     return null;
   }
 
-  async resolveEverything(opts: {report: Report, lockfileOnly: true, resolver?: Resolver} | {report: Report, lockfileOnly?: boolean, cache: Cache, resolver?: Resolver}) {
+  async resolveEverything(opts: Pick<InstallOptions, `report` | `resolver` | `mode`> & ({report: Report, lockfileOnly: true} | {lockfileOnly?: boolean, cache: Cache})) {
     if (!this.workspacesByCwd || !this.workspacesByIdent)
       throw new Error(`Workspaces must have been setup before calling this function`);
 
@@ -830,11 +848,11 @@ export class Project {
     this.refreshWorkspaceDependencies();
   }
 
-  async fetchEverything({cache, report, fetcher: userFetcher}: InstallOptions) {
+  async fetchEverything({cache, report, fetcher: userFetcher, mode}: InstallOptions) {
     const fetcher = userFetcher || this.configuration.makeFetcher();
     const fetcherOptions = {checksums: this.storedChecksums, project: this, cache, fetcher, report};
 
-    const locatorHashes = Array.from(
+    let locatorHashes = Array.from(
       new Set(
         miscUtils.sortMap(this.storedResolutions.values(), [
           (locatorHash: LocatorHash) => {
@@ -844,9 +862,15 @@ export class Project {
 
             return structUtils.stringifyLocator(pkg);
           },
-        ])
-      )
+        ]),
+      ),
     );
+
+    // In "dependency update" mode, we won't trigger the link step. As a
+    // result, we only need to fetch the packages that are missing their
+    // hashes (to add them to the lockfile).
+    if (mode === InstallMode.UpdateLockfile)
+      locatorHashes = locatorHashes.filter(locatorHash => !this.storedChecksums.has(locatorHash));
 
     let firstError = false;
 
@@ -892,7 +916,7 @@ export class Project {
     }
   }
 
-  async linkEverything({cache, report, fetcher: optFetcher, skipBuild}: InstallOptions) {
+  async linkEverything({cache, report, fetcher: optFetcher, mode}: InstallOptions) {
     const fetcher = optFetcher || this.configuration.makeFetcher();
     const fetcherOptions = {checksums: this.storedChecksums, project: this, cache, fetcher, report, skipIntegrityCheck: true};
 
@@ -922,6 +946,8 @@ export class Project {
       return [locatorHash, await fetcher.fetch(pkg, fetcherOptions)] as const;
     })));
 
+    const pendingPromises: Array<Promise<void>> = [];
+
     // Step 1: Installing the packages on the disk
 
     for (const locatorHash of this.accessibleLocators) {
@@ -933,8 +959,12 @@ export class Project {
       if (typeof fetchResult === `undefined`)
         throw new Error(`Assertion failed: The fetch result should have been registered`);
 
-      const workspace = this.tryWorkspaceByLocator(pkg);
+      const holdPromises: Array<Promise<void>> = [];
+      const holdFetchResult = (promise: Promise<void>) => {
+        holdPromises.push(promise);
+      };
 
+      const workspace = this.tryWorkspaceByLocator(pkg);
       if (workspace !== null) {
         const buildScripts: Array<BuildDirective> = [];
         const {scripts} = workspace.manifest;
@@ -944,22 +974,29 @@ export class Project {
             buildScripts.push([BuildType.SCRIPT, scriptName]);
 
         try {
-          for (const installer of installers.values()) {
-            const result = await installer.installPackage(pkg, fetchResult);
-            if (result.buildDirective !== null) {
-              throw new Error(`Assertion failed: Linkers can't return build directives for workspaces; this responsibility befalls to the Yarn core`);
+          for (const [linker, installer] of installers) {
+            if (linker.supportsPackage(pkg, linkerOptions)) {
+              const result = await installer.installPackage(pkg, fetchResult, {holdFetchResult});
+              if (result.buildDirective !== null) {
+                throw new Error(`Assertion failed: Linkers can't return build directives for workspaces; this responsibility befalls to the Yarn core`);
+              }
             }
           }
         } finally {
-          if (fetchResult.releaseFs) {
-            fetchResult.releaseFs();
+          if (holdPromises.length === 0) {
+            fetchResult.releaseFs?.();
+          } else {
+            pendingPromises.push(Promise.all(holdPromises).catch(() => {}).then(() => {
+              fetchResult.releaseFs?.();
+            }));
           }
         }
 
         const location = ppath.join(fetchResult.packageFs.getRealPath(), fetchResult.prefixPath);
         packageLocations.set(pkg.locatorHash, location);
 
-        if (buildScripts.length > 0) {
+        // Virtual workspaces shouldn't be built as they don't really exist
+        if (!structUtils.isVirtualLocator(pkg) && buildScripts.length > 0) {
           packageBuildDirectives.set(pkg.locatorHash, {
             directives: buildScripts,
             buildLocations: [location],
@@ -974,19 +1011,23 @@ export class Project {
         if (!installer)
           throw new Error(`Assertion failed: The installer should have been registered`);
 
-        let installStatus;
+        let installStatus: InstallStatus;
         try {
-          installStatus = await installer.installPackage(pkg, fetchResult);
+          installStatus = await installer.installPackage(pkg, fetchResult, {holdFetchResult});
         } finally {
-          if (fetchResult.releaseFs) {
-            fetchResult.releaseFs();
+          if (holdPromises.length === 0) {
+            fetchResult.releaseFs?.();
+          } else {
+            pendingPromises.push(Promise.all(holdPromises).then(() => {}).then(() => {
+              fetchResult.releaseFs?.();
+            }));
           }
         }
 
         packageLinkers.set(pkg.locatorHash, linker);
         packageLocations.set(pkg.locatorHash, installStatus.packageLocation);
 
-        if (installStatus.buildDirective && installStatus.packageLocation) {
+        if (installStatus.buildDirective && installStatus.buildDirective.length > 0 && installStatus.packageLocation) {
           packageBuildDirectives.set(pkg.locatorHash, {
             directives: installStatus.buildDirective,
             buildLocations: [installStatus.packageLocation],
@@ -1031,11 +1072,11 @@ export class Project {
 
           const isWorkspaceDependency = dependencyLinker === null;
 
-          if (dependencyLinker === packageLinker || isWorkspace || isWorkspaceDependency) {
+          if (dependencyLinker === packageLinker || isWorkspaceDependency) {
             if (packageLocations.get(dependency.locatorHash) !== null) {
               internalDependencies.push([descriptor, dependency] as [Descriptor, Locator]);
             }
-          } else if (packageLocation !== null) {
+          } else if (!isWorkspace && packageLocation !== null) {
             const externalEntry = miscUtils.getArrayWithDefault(externalDependents, resolution);
             externalEntry.push(packageLocation);
           }
@@ -1048,7 +1089,9 @@ export class Project {
 
       if (isWorkspace) {
         for (const [packageLinker, installer] of installers) {
-          await linkPackage(packageLinker, installer);
+          if (packageLinker.supportsPackage(pkg, linkerOptions)) {
+            await linkPackage(packageLinker, installer);
+          }
         }
       } else {
         const packageLinker = packageLinkers.get(pkg.locatorHash);
@@ -1100,11 +1143,11 @@ export class Project {
 
     this.installersCustomData = installersCustomData;
 
-    await this.persistInstallStateFile();
+    await Promise.all(pendingPromises);
 
     // Step 4: Build the packages in multiple steps
 
-    if (skipBuild)
+    if (mode === InstallMode.SkipBuild)
       return;
 
     const readyPackages = new Set(this.storedPackages.keys());
@@ -1116,7 +1159,7 @@ export class Project {
     const globalHashGenerator = createHash(`sha512`);
     globalHashGenerator.update(process.versions.node);
 
-    this.configuration.triggerHook(hooks => {
+    await this.configuration.triggerHook(hooks => {
       return hooks.globalHashGeneration;
     }, this, (data: Buffer | string) => {
       globalHashGenerator.update(`\0`);
@@ -1177,14 +1220,11 @@ export class Project {
       return builder.digest(`hex`);
     };
 
-    const bstatePath: PortablePath = this.configuration.get(`bstatePath`);
-    const bstate = xfs.existsSync(bstatePath)
-      ? parseSyml(await xfs.readFilePromise(bstatePath, `utf8`)) as {[key: string]: string}
-      : {};
-
     // We reconstruct the build state from an empty object because we want to
     // remove the state from packages that got removed
     const nextBState = new Map<LocatorHash, string>();
+
+    let isInstallStatePersisted = false;
 
     while (buildablePackages.size > 0) {
       const savedSize = buildablePackages.size;
@@ -1221,15 +1261,24 @@ export class Project {
         const buildHash = getBuildHash(pkg, buildInfo.buildLocations);
 
         // No need to rebuild the package if its hash didn't change
-        if (Object.prototype.hasOwnProperty.call(bstate, pkg.locatorHash) && bstate[pkg.locatorHash] === buildHash) {
+        if (this.storedBuildState.get(pkg.locatorHash) === buildHash) {
           nextBState.set(pkg.locatorHash, buildHash);
           continue;
         }
 
-        if (Object.prototype.hasOwnProperty.call(bstate, pkg.locatorHash))
+        // The install state is persisted after the builds finish (because it
+        // contains the build state), but if we need to run builds then we
+        // also need it to be written before the builds (since the build
+        // scripts will need it to run).
+        if (!isInstallStatePersisted) {
+          await this.persistInstallStateFile();
+          isInstallStatePersisted = true;
+        }
+
+        if (this.storedBuildState.has(pkg.locatorHash))
           report.reportInfo(MessageName.MUST_REBUILD, `${structUtils.prettyLocator(this.configuration, pkg)} must be rebuilt because its dependency tree changed`);
         else
-          report.reportInfo(MessageName.MUST_BUILD, `${structUtils.prettyLocator(this.configuration, pkg)} must be built because it never did before or the last one failed`);
+          report.reportInfo(MessageName.MUST_BUILD, `${structUtils.prettyLocator(this.configuration, pkg)} must be built because it never has been before or the last one failed`);
 
         for (const location of buildInfo.buildLocations) {
           if (!ppath.isAbsolute(location))
@@ -1249,7 +1298,7 @@ export class Project {
 
               const stdin = null;
 
-              await xfs.mktempPromise(async logDir => {
+              const wasBuildSuccessful = await xfs.mktempPromise(async logDir => {
                 const logFile = ppath.join(logDir, `build.log` as PortablePath);
 
                 const {stdout, stderr} = this.configuration.getSubprocessStreams(logFile, {
@@ -1284,16 +1333,20 @@ export class Project {
                 xfs.detachTemp(logDir);
 
                 const buildMessage = `${structUtils.prettyLocator(this.configuration, pkg)} couldn't be built successfully (exit code ${formatUtils.pretty(this.configuration, exitCode, formatUtils.Type.NUMBER)}, logs can be found here: ${formatUtils.pretty(this.configuration, logFile, formatUtils.Type.PATH)})`;
-                report.reportInfo(MessageName.BUILD_FAILED, buildMessage);
 
                 if (this.optionalBuilds.has(pkg.locatorHash)) {
+                  report.reportInfo(MessageName.BUILD_FAILED, buildMessage);
                   nextBState.set(pkg.locatorHash, buildHash);
                   return true;
+                } else {
+                  report.reportError(MessageName.BUILD_FAILED, buildMessage);
+                  return false;
                 }
-
-                report.reportError(MessageName.BUILD_FAILED, buildMessage);
-                return false;
               });
+
+              if (!wasBuildSuccessful) {
+                return;
+              }
             }
           })());
         }
@@ -1319,21 +1372,11 @@ export class Project {
       }
     }
 
-    // We can now generate the bstate file, which will allow us to "remember"
+    // We can now update the storedBuildState, which will allow us to "remember"
     // what's the dependency tree subset that we used to build a specific
     // package (and avoid rebuilding it later if it didn't change).
 
-    if (nextBState.size > 0) {
-      const bstatePath = this.configuration.get(`bstatePath`);
-      const bstateFile = Project.generateBuildStateFile(nextBState, this.storedPackages);
-
-      await xfs.mkdirPromise(ppath.dirname(bstatePath), {recursive: true});
-      await xfs.changeFilePromise(bstatePath, bstateFile, {
-        automaticNewlines: true,
-      });
-    } else {
-      await xfs.removePromise(bstatePath);
-    }
+    this.storedBuildState = nextBState;
   }
 
   async install(opts: InstallOptions) {
@@ -1436,22 +1479,27 @@ export class Project {
     await opts.report.startTimerPromise(`Fetch step`, async () => {
       await this.fetchEverything(opts);
 
-      if (typeof opts.persistProject === `undefined` || opts.persistProject) {
+      if ((typeof opts.persistProject === `undefined` || opts.persistProject) && opts.mode !== InstallMode.UpdateLockfile) {
         await this.cacheCleanup(opts);
       }
     });
+
+    const immutablePatterns = opts.immutable
+      ? [...new Set(this.configuration.get(`immutablePatterns`))].sort()
+      : [];
+
+    const before = await Promise.all(immutablePatterns.map(async pattern => {
+      return hashUtils.checksumPattern(pattern, {cwd: this.cwd});
+    }));
 
     if (typeof opts.persistProject === `undefined` || opts.persistProject)
       await this.persist();
 
     await opts.report.startTimerPromise(`Link step`, async () => {
-      const immutablePatterns = opts.immutable
-        ? [...new Set(this.configuration.get(`immutablePatterns`))].sort()
-        : [];
-
-      const before = await Promise.all(immutablePatterns.map(async pattern => {
-        return hashUtils.checksumPattern(pattern, {cwd: this.cwd});
-      }));
+      if (opts.mode === InstallMode.UpdateLockfile) {
+        opts.report.reportWarning(MessageName.UPDATE_LOCKFILE_ONLY_SKIP_LINK, `Skipped due to ${formatUtils.pretty(this.configuration, `mode=update-lockfile`, formatUtils.Type.CODE)}`);
+        return;
+      }
 
       await this.linkEverything(opts);
 
@@ -1588,15 +1636,20 @@ export class Project {
       fields.push(...category);
 
     const installState = pick(this, fields) as InstallState;
-    const serializedState = await gzip(v8.serialize(installState));
+    const serializedState = v8.serialize(installState);
+    const newInstallStateChecksum = hashUtils.makeHash(serializedState);
+    if (this.installStateChecksum === newInstallStateChecksum)
+      return;
 
     const installStatePath = this.configuration.get(`installStatePath`);
 
     await xfs.mkdirPromise(ppath.dirname(installStatePath), {recursive: true});
-    await xfs.changeFilePromise(installStatePath, serializedState as Buffer);
+    await xfs.writeFilePromise(installStatePath, await gzip(serializedState) as Buffer);
+
+    this.installStateChecksum = newInstallStateChecksum;
   }
 
-  async restoreInstallState({restoreInstallersCustomData = true, restoreResolutions = true}: RestoreInstallStateOpts = {}) {
+  async restoreInstallState({restoreInstallersCustomData = true, restoreResolutions = true, restoreBuildState = true}: RestoreInstallStateOpts = {}) {
     const installStatePath = this.configuration.get(`installStatePath`);
     if (!xfs.existsSync(installStatePath)) {
       if (restoreResolutions)
@@ -1604,13 +1657,19 @@ export class Project {
       return;
     }
 
-    const serializedState = await xfs.readFilePromise(installStatePath);
-    const installState: InstallState = v8.deserialize(await gunzip(serializedState) as Buffer);
+    const installStateBuffer = await gunzip(await xfs.readFilePromise(installStatePath)) as Buffer;
+    this.installStateChecksum = hashUtils.makeHash(installStateBuffer);
+    const installState: InstallState = v8.deserialize(installStateBuffer);
 
     if (restoreInstallersCustomData)
       if (typeof installState.installersCustomData !== `undefined`)
         this.installersCustomData = installState.installersCustomData;
 
+    if (restoreBuildState)
+      Object.assign(this, pick(installState, INSTALL_STATE_FIELDS.restoreBuildState));
+
+    // Resolutions needs to be restored last otherwise applyLightResolution will persist a new state
+    // before the rest is restored
     if (restoreResolutions) {
       if (installState.lockFileChecksum === this.lockFileChecksum) {
         Object.assign(this, pick(installState, INSTALL_STATE_FIELDS.restoreResolutions));
@@ -1643,11 +1702,16 @@ export class Project {
       `.gitignore`,
     ]);
 
-    if (!xfs.existsSync(cache.cwd))
-      return;
-
     if (!isFolderInside(cache.cwd, this.cwd))
       return;
+
+    if (!(await xfs.existsPromise(cache.cwd)))
+      return;
+
+    const preferAggregateCacheInfo = this.configuration.get(`preferAggregateCacheInfo`);
+
+    let entriesRemoved = 0;
+    let lastEntryRemoved = null;
 
     for (const entry of await xfs.readdirPromise(cache.cwd)) {
       if (PRESERVED_FILES.has(entry))
@@ -1657,12 +1721,27 @@ export class Project {
       if (cache.markedFiles.has(entryPath))
         continue;
 
+      lastEntryRemoved = entry;
+
       if (cache.immutable) {
-        report.reportError(MessageName.IMMUTABLE_CACHE, `${formatUtils.pretty(this.configuration, ppath.basename(entryPath), `magenta`)} appears to be unused and would marked for deletion, but the cache is immutable`);
+        report.reportError(MessageName.IMMUTABLE_CACHE, `${formatUtils.pretty(this.configuration, ppath.basename(entryPath), `magenta`)} appears to be unused and would be marked for deletion, but the cache is immutable`);
       } else {
-        report.reportInfo(MessageName.UNUSED_CACHE_ENTRY, `${formatUtils.pretty(this.configuration, ppath.basename(entryPath), `magenta`)} appears to be unused - removing`);
+        if (preferAggregateCacheInfo)
+          entriesRemoved += 1;
+        else
+          report.reportInfo(MessageName.UNUSED_CACHE_ENTRY, `${formatUtils.pretty(this.configuration, ppath.basename(entryPath), `magenta`)} appears to be unused - removing`);
+
         await xfs.removePromise(entryPath);
       }
+    }
+
+    if (preferAggregateCacheInfo && entriesRemoved !== 0) {
+      report.reportInfo(
+        MessageName.UNUSED_CACHE_ENTRY,
+        entriesRemoved > 1
+          ? `${entriesRemoved} packages appeared to be unused and were removed`
+          : `${lastEntryRemoved} appeared to be unused and was removed`,
+      );
     }
 
     cache.markedFiles.clear();
@@ -1774,18 +1853,18 @@ function applyVirtualResolutionMutations({
     return pkg;
   };
 
-  const resolvePeerDependencies = (parentLocator: Locator, peerSlots: Map<IdentHash, LocatorHash>, {first, optional}: {first: boolean, optional: boolean}) => {
+  const resolvePeerDependencies = (parentLocator: Locator, peerSlots: Map<IdentHash, LocatorHash>, {top, optional}: {top: LocatorHash, optional: boolean}) => {
     if (resolutionStack.length > 1000)
       reportStackOverflow();
 
     resolutionStack.push(parentLocator);
-    const result = resolvePeerDependenciesImpl(parentLocator, peerSlots, {first, optional});
+    const result = resolvePeerDependenciesImpl(parentLocator, peerSlots, {top, optional});
     resolutionStack.pop();
 
     return result;
   };
 
-  const resolvePeerDependenciesImpl = (parentLocator: Locator, peerSlots: Map<IdentHash, LocatorHash>, {first, optional}: {first: boolean, optional: boolean}) => {
+  const resolvePeerDependenciesImpl = (parentLocator: Locator, peerSlots: Map<IdentHash, LocatorHash>, {top, optional}: {top: LocatorHash, optional: boolean}) => {
     if (accessibleLocators.has(parentLocator.locatorHash))
       return;
 
@@ -1819,7 +1898,7 @@ function applyVirtualResolutionMutations({
       // We shouldn't virtualize the package if it was obtained through a peer
       // dependency (which can't be the case for workspaces when resolved
       // through their top-level)
-      if (parentPackage.peerDependencies.has(descriptor.identHash) && !first)
+      if (parentPackage.peerDependencies.has(descriptor.identHash) && parentPackage.locatorHash !== top)
         continue;
 
       // We had some issues where virtual packages were incorrectly set inside
@@ -1861,7 +1940,7 @@ function applyVirtualResolutionMutations({
         throw new Error(`Assertion failed: The package (${resolution}, resolved from ${structUtils.prettyDescriptor(project.configuration, descriptor)}) should have been registered`);
 
       if (pkg.peerDependencies.size === 0) {
-        resolvePeerDependencies(pkg, new Map(), {first: false, optional: isOptional});
+        resolvePeerDependencies(pkg, new Map(), {top, optional: isOptional});
         continue;
       }
 
@@ -1911,7 +1990,8 @@ function applyVirtualResolutionMutations({
             volatileDescriptors.delete(peerDescriptor.descriptorHash);
           }
 
-          if (!peerDescriptor && virtualizedPackage.dependencies.has(peerRequest.identHash)) {
+          // If the peerRequest isn't provided by the parent then fall back to dependencies
+          if ((!peerDescriptor || peerDescriptor.range === `missing:`) && virtualizedPackage.dependencies.has(peerRequest.identHash)) {
             virtualizedPackage.peerDependencies.delete(peerRequest.identHash);
             continue;
           }
@@ -1949,7 +2029,7 @@ function applyVirtualResolutionMutations({
         const next = typeof current !== `undefined` ? current + 1 : 1;
 
         virtualStack.set(pkg.locatorHash, next);
-        resolvePeerDependencies(virtualizedPackage, nextPeerSlots, {first: false, optional: isOptional});
+        resolvePeerDependencies(virtualizedPackage, nextPeerSlots, {top, optional: isOptional});
         virtualStack.set(pkg.locatorHash, next - 1);
       });
 
@@ -2010,7 +2090,7 @@ function applyVirtualResolutionMutations({
             if (typeof resolution === `undefined`)
               throw new Error(`Assertion failed: Expected the resolution for ${structUtils.prettyDescriptor(project.configuration, descriptor)} to have been registered`);
 
-            return resolution;
+            return resolution === top ? `${resolution} (top)` : resolution;
           }),
           // We use the identHash to disambiguate between virtual descriptors
           // with different base idents being resolved to the same virtual package.
@@ -2061,13 +2141,16 @@ function applyVirtualResolutionMutations({
   };
 
   for (const workspace of project.workspaces) {
+    const locator = workspace.anchoredLocator;
+
     volatileDescriptors.delete(workspace.anchoredDescriptor.descriptorHash);
-    resolvePeerDependencies(workspace.anchoredLocator, new Map(), {first: true, optional: false});
+    resolvePeerDependencies(locator, new Map(), {top: locator.locatorHash, optional: false});
   }
 
   enum WarningType {
     NotProvided,
     NotCompatible,
+    NotWorkspace,
   }
 
   type Warning = {
@@ -2151,6 +2234,16 @@ function applyVirtualResolutionMutations({
           }
 
           const satisfiesAll = [...ranges].every(range => {
+            if (range.startsWith(WorkspaceResolver.protocol)) {
+              if (!project.tryWorkspaceByLocator(peerResolution))
+                return false;
+
+              range = range.slice(WorkspaceResolver.protocol.length);
+              if (range === `^` || range === `~`) {
+                range = `*`;
+              }
+            }
+
             return semverUtils.satisfiesWithPrereleases(peerVersion, range);
           });
 

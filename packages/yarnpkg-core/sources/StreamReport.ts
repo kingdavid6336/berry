@@ -5,6 +5,7 @@ import {Configuration}                            from './Configuration';
 import {MessageName, stringifyMessageName}        from './MessageName';
 import {ProgressDefinition, Report, TimerOptions} from './Report';
 import * as formatUtils                           from './formatUtils';
+import * as structUtils                           from './structUtils';
 import {Locator}                                  from './types';
 
 export type StreamReportOptions = {
@@ -30,7 +31,7 @@ const GROUP = process.env.GITHUB_ACTIONS
   : process.env.TRAVIS
     ? {start: (what: string) => `travis_fold:start:${what}\n`, end: (what: string) => `travis_fold:end:${what}\n`}
     : process.env.GITLAB_CI
-      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
+      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}[collapsed=true]\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
       : null;
 
 const now = new Date();
@@ -96,10 +97,6 @@ export function formatNameWithHyperlink(name: MessageName | null, {configuration
   if (!code)
     return code;
 
-  // Only print hyperlinks if allowed per configuration
-  if (!configuration.get(`enableHyperlinks`))
-    return code;
-
   // Don't print hyperlinks for the generic messages
   if (name === null || name === MessageName.UNNAMED)
     return code;
@@ -107,11 +104,7 @@ export function formatNameWithHyperlink(name: MessageName | null, {configuration
   const desc = MessageName[name];
   const href = `https://yarnpkg.com/advanced/error-codes#${code}---${desc}`.toLowerCase();
 
-  // We use BELL as ST because it seems that iTerm doesn't properly support
-  // the \x1b\\ sequence described in the reference document
-  // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#the-escape-sequence
-
-  return `\u001b]8;;${href}\u0007${code}\u001b]8;;\u0007`;
+  return formatUtils.applyHyperlink(configuration, code, href);
 }
 
 export class StreamReport extends Report {
@@ -160,6 +153,7 @@ export class StreamReport extends Report {
 
   private cacheHitCount: number = 0;
   private cacheMissCount: number = 0;
+  private lastCacheMiss: Locator | null = null;
 
   private warningCount: number = 0;
   private errorCount: number = 0;
@@ -231,6 +225,7 @@ export class StreamReport extends Report {
   }
 
   reportCacheMiss(locator: Locator, message?: string) {
+    this.lastCacheMiss = locator;
     this.cacheMissCount += 1;
 
     if (typeof message !== `undefined` && !this.configuration.get(`preferAggregateCacheInfo`)) {
@@ -238,8 +233,8 @@ export class StreamReport extends Report {
     }
   }
 
-  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): void;
-  startTimerSync<T>(what: string, cb: () => T): void;
+  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): T;
+  startTimerSync<T>(what: string, cb: () => T): T;
   startTimerSync<T>(what: string, opts: TimerOptions | (() => T), cb?: () => T) {
     const realOpts = typeof opts === `function` ? {} : opts;
     const realCb = typeof opts === `function` ? opts : cb!;
@@ -248,7 +243,7 @@ export class StreamReport extends Report {
       this.reportInfo(null, `┌ ${what}`);
       this.indent += 1;
 
-      if (GROUP !== null) {
+      if (GROUP !== null && !this.json && this.includeInfos) {
         this.stdout.write(GROUP.start(what));
       }
     }};
@@ -274,7 +269,7 @@ export class StreamReport extends Report {
       if (mark.committed) {
         this.indent -= 1;
 
-        if (GROUP !== null)
+        if (GROUP !== null && !this.json && this.includeInfos)
           this.stdout.write(GROUP.end(what));
 
         if (this.configuration.get(`enableTimers`) && after - before > 200) {
@@ -286,8 +281,8 @@ export class StreamReport extends Report {
     }
   }
 
-  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<void>;
-  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<void>;
+  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<T>;
   async startTimerPromise<T>(what: string, opts: TimerOptions | (() => Promise<T>), cb?: () => Promise<T>) {
     const realOpts = typeof opts === `function` ? {} : opts;
     const realCb = typeof opts === `function` ? opts : cb!;
@@ -296,7 +291,7 @@ export class StreamReport extends Report {
       this.reportInfo(null, `┌ ${what}`);
       this.indent += 1;
 
-      if (GROUP !== null) {
+      if (GROUP !== null && !this.json && this.includeInfos) {
         this.stdout.write(GROUP.start(what));
       }
     }};
@@ -322,7 +317,7 @@ export class StreamReport extends Report {
       if (mark.committed) {
         this.indent -= 1;
 
-        if (GROUP !== null)
+        if (GROUP !== null && !this.json && this.includeInfos)
           this.stdout.write(GROUP.end(what));
 
         if (this.configuration.get(`enableTimers`) && after - before > 200) {
@@ -538,13 +533,13 @@ export class StreamReport extends Report {
       if (this.cacheMissCount > 1) {
         fetchStatus += `, ${this.cacheMissCount} had to be fetched`;
       } else if (this.cacheMissCount === 1) {
-        fetchStatus += `, one had to be fetched`;
+        fetchStatus += `, one had to be fetched (${structUtils.prettyLocator(this.configuration, this.lastCacheMiss!)})`;
       }
     } else {
       if (this.cacheMissCount > 1) {
         fetchStatus += ` - ${this.cacheMissCount} packages had to be fetched`;
       } else if (this.cacheMissCount === 1) {
-        fetchStatus += ` - one package had to be fetched`;
+        fetchStatus += ` - one package had to be fetched (${structUtils.prettyLocator(this.configuration, this.lastCacheMiss!)})`;
       }
     }
 

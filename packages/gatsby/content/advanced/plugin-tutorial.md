@@ -15,7 +15,7 @@ Starting from the Yarn 2, Yarn now supports plugins. For more information about 
 
 Plugins are scripts that get loaded at runtime by Yarn, and that can inject new behaviors into it. They also can require some packages provided by Yarn itself, such as `@yarnpkg/core`. This allows you to use the exact same core API as the Yarn binary currently in use, kinda like if it was a peer dependency!
 
-> **Important:** Since plugins are loaded before Yarn starts (and thus before you make your first install), it's strongly advised to write your plugins in such a way that they work without dependencies. If that becomes difficult, know that we provide a powerful tool ([`@yarnpkg/builder`](#builder)) that can bundle your plugins into a single Javascript file, ready to be published.
+> **Important:** Since plugins are loaded before Yarn starts (and thus before you make your first install), it's strongly advised to write your plugins in such a way that they work without dependencies. If that becomes difficult, know that we provide a powerful tool ([`@yarnpkg/builder`](#all-in-one-plugin-builder) that can bundle your plugins into a single Javascript file, ready to be published.
 
 ## Writing our first plugin
 
@@ -51,7 +51,7 @@ That's it! You have your first plugin, congratulations! Of course it doesn't do 
 
 ## All-in-one plugin builder
 
-As we saw, plugins are meant to be standalone JavaScript source files. It's very possible to author them by hand, especially if you only need a small one, but once you start adding multiple commands it can become a bit more complicated. To make this process easyer, we maintain a package called `@yarnpkg/builder`. This builder is to Yarn what Next.js is to web development - it's a tool designed to help creating, building, and managing complex plugins written in TypeScript.
+As we saw, plugins are meant to be standalone JavaScript source files. It's very possible to author them by hand, especially if you only need a small one, but once you start adding multiple commands it can become a bit more complicated. To make this process easier, we maintain a package called `@yarnpkg/builder`. This builder is to Yarn what Next.js is to web development - it's a tool designed to help creating, building, and managing complex plugins written in TypeScript.
 
 Its documentation can be found on the [dedicated page](https://github.com/yarnpkg/berry/blob/master/packages/yarnpkg-builder/README.md), but remember that you're not required to use it. Sometimes good old scripts are just fine!
 
@@ -142,7 +142,7 @@ module.exports = {
   name: `plugin-hello-world`,
   factory: require => ({
     hooks: {
-      setupScriptEnvironment(scriptEnv) {
+      setupScriptEnvironment(project, scriptEnv) {
         scriptEnv.HELLO_WORLD = `my first plugin!`;
       },
     },
