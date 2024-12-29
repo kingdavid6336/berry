@@ -25,6 +25,7 @@ jobs:
           - classic
           - yarn
           - yarn-nm
+          - yarn-pnpm
           - npm
           - pnpm
 
@@ -32,12 +33,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@v4
 
-    - name: 'Use Node.js 14.x'
-      uses: actions/setup-node@master
+    - uses: ./.github/actions/prepare
       with:
-        node-version: 14.x
+        minify-bundle: true
 
     - name: 'Install Hyperfine'
       run: |
@@ -47,8 +47,6 @@ jobs:
     - name: 'Install the package manager'
       run: |
         case ${{matrix.packageManager}} in
-          yarn|yarn-nm)
-            node scripts/run-yarn.js build:cli --no-minify;;
           npm)
             npm install -g npm@^7;;
           pnpm)

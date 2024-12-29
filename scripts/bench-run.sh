@@ -41,9 +41,25 @@ setup-yarn2-nm() {
   >> "$BENCH_DIR/.yarnrc.yml" echo \
     "nodeLinker: node-modules"
   >> "$BENCH_DIR/.yarnrc.yml" echo \
+    "nmMode: hardlinks-local"
+  >> "$BENCH_DIR/.yarnrc.yml" echo \
     "enableGlobalCache: true"
   >> "$BENCH_DIR/.yarnrc.yml" echo \
     "compressionLevel: 0"
+}
+
+setup-yarn2-pnpm() {
+  >> "$BENCH_DIR/.yarnrc.yml" echo \
+    "nodeLinker: pnpm"
+  >> "$BENCH_DIR/.yarnrc.yml" echo \
+    "enableGlobalCache: true"
+  >> "$BENCH_DIR/.yarnrc.yml" echo \
+    "compressionLevel: 0"
+}
+
+setup-pnpm() {
+  >> "$BENCH_DIR/.npmrc" echo \
+    "strict-peer-dependencies=false"
 }
 
 case $PACKAGE_MANAGER in
@@ -64,7 +80,7 @@ case $PACKAGE_MANAGER in
   yarn)
     setup-yarn2
     bench install-full-cold \
-      --prepare 'rm -rf .yarn .pnp.* yarn.lock && yarn cache clean --all' \
+      --prepare 'rm -rf .yarn .pnp.* yarn.lock .yarn-global' \
       'yarn install'
     bench install-cache-only \
       --prepare 'rm -rf .yarn .pnp.* yarn.lock' \
@@ -80,7 +96,23 @@ case $PACKAGE_MANAGER in
     setup-yarn2
     setup-yarn2-nm
     bench install-full-cold \
-      --prepare 'rm -rf .yarn node_modules yarn.lock && yarn cache clean --all' \
+      --prepare 'rm -rf .yarn node_modules yarn.lock .yarn-global' \
+      'yarn install'
+    bench install-cache-only \
+      --prepare 'rm -rf .yarn node_modules yarn.lock' \
+      'yarn install'
+    bench install-cache-and-lock \
+      --prepare 'rm -rf .yarn node_modules' \
+      'yarn install'
+    bench install-ready \
+      --prepare 'yarn remove dummy-pkg || true' \
+      'yarn add dummy-pkg@link:./dummy-pkg'
+    ;;
+  yarn-pnpm)
+    setup-yarn2
+    setup-yarn2-pnpm
+    bench install-full-cold \
+      --prepare 'rm -rf .yarn node_modules yarn.lock .yarn-global' \
       'yarn install'
     bench install-cache-only \
       --prepare 'rm -rf .yarn node_modules yarn.lock' \
@@ -107,8 +139,9 @@ case $PACKAGE_MANAGER in
       'npm add dummy-pkg@file:./dummy-pkg'
     ;;
   pnpm)
+    setup-pnpm
     bench install-full-cold \
-      --prepare 'rm -rf node_modules pnpm-lock.yaml ~/.pnpm-store' \
+      --prepare 'rm -rf node_modules pnpm-lock.yaml ~/.local/share/pnpm/store ~/.cache/pnpm' \
       'pnpm install'
     bench install-cache-only \
       --prepare 'rm -rf node_modules pnpm-lock.yaml' \

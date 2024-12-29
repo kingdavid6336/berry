@@ -44,37 +44,23 @@ export default class NpmTagRemoveCommand extends BaseCommand {
     const prettyIdent = formatUtils.pretty(configuration, ident, formatUtils.Type.IDENT);
 
     const distTags = await getDistTags(ident, configuration);
-    if (!Object.prototype.hasOwnProperty.call(distTags, this.tag))
+    if (!Object.hasOwn(distTags, this.tag))
       throw new UsageError(`${prettyTag} is not a tag of package ${prettyIdent}`);
 
     const report = await StreamReport.start({
       configuration,
       stdout: this.context.stdout,
     }, async report => {
-      try {
-        const url = `/-/package${npmHttpUtils.getIdentUrl(ident)}/dist-tags/${encodeURIComponent(this.tag)}`;
+      const url = `/-/package${npmHttpUtils.getIdentUrl(ident)}/dist-tags/${encodeURIComponent(this.tag)}`;
 
-        await npmHttpUtils.del(url, {
-          configuration,
-          registry,
-          ident,
-          jsonResponse: true,
-        });
-      } catch (error) {
-        if (error.name !== `HTTPError`) {
-          throw error;
-        } else {
-          const message = error.response.body && error.response.body.error
-            ? error.response.body.error
-            : `The remote server answered with HTTP ${error.response.statusCode} ${error.response.statusMessage}`;
+      await npmHttpUtils.del(url, {
+        configuration,
+        registry,
+        ident,
+        jsonResponse: true,
+      });
 
-          report.reportError(MessageName.NETWORK_ERROR, message);
-        }
-      }
-
-      if (!report.hasErrors()) {
-        report.reportInfo(MessageName.UNNAMED, `Tag ${prettyTag} removed from package ${prettyIdent}`);
-      }
+      report.reportInfo(MessageName.UNNAMED, `Tag ${prettyTag} removed from package ${prettyIdent}`);
     });
 
     return report.exitCode();

@@ -1,10 +1,9 @@
-import {PortablePath} from '@yarnpkg/fslib';
-import {exec}         from 'pkg-tests-core';
-import {fs}           from 'pkg-tests-core';
+import {PortablePath, xfs} from '@yarnpkg/fslib';
+import {fs, tests}         from 'pkg-tests-core';
 
-const {readFile, writeFile, writeJson} = fs;
+const {writeFile, writeJson} = fs;
 
-const getWorkspaces = async (run: (...args: Array<string>) => Promise<exec.ExecResult>) => {
+const getWorkspaces = async (run: tests.Run) => {
   const {stdout} = await run(`workspaces`, `list`, `--json`);
   const workspaces: Array<string> = stdout
     .trim()
@@ -33,7 +32,7 @@ describe(`Workspaces tests`, () => {
         `packages/baz`,
         `packages/foo`,
       ]);
-    })
+    }),
   );
 
   test(
@@ -53,11 +52,11 @@ describe(`Workspaces tests`, () => {
         `packages/bar`,
         `packages/baz`,
       ]);
-    })
+    }),
   );
 
   test(
-    `it should not implicitely make workspaces require-able`,
+    `it should not implicitly make workspaces require-able`,
     makeTemporaryEnv(
       {
         private: true,
@@ -242,7 +241,7 @@ describe(`Workspaces tests`, () => {
 
         await expect(
           run(`run`, `has-bin-entries`, `foo`, {
-            cwd: `${path}/packages/workspace`,
+            cwd: `${path}/packages/workspace` as PortablePath,
           }),
         ).resolves.toMatchObject({stdout: `foo\n`});
       },
@@ -273,12 +272,30 @@ describe(`Workspaces tests`, () => {
 
         await run(`install`);
 
-        await expect(readFile(`${path}/packages/workspace/workspace.dat` as PortablePath, `utf8`)).resolves.toEqual([
+        await expect(xfs.readFilePromise(`${path}/packages/workspace/workspace.dat` as PortablePath, `utf8`)).resolves.toEqual([
           `Preinstall\n`,
           `Install\n`,
           `Postinstall\n`,
         ].join(``));
       },
     ),
+  );
+
+  test(
+    `it should allow aliasing workspaces using relative paths`,
+    makeTemporaryMonorepoEnv({
+      workspaces: [`packages/*`],
+      dependencies: {
+        [`bar`]: `workspace:packages/foo`,
+      },
+    }, {
+      [`packages/foo`]: {
+        name: `foo`,
+      },
+    }, async ({path, run, source}) => {
+      await run(`install`);
+
+      await expect(source(`require('bar/package.json').name`)).resolves.toEqual(`foo`);
+    }),
   );
 });

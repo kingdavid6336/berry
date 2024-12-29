@@ -1,17 +1,35 @@
-import {Plugin, SettingsType, miscUtils} from '@yarnpkg/core';
+import {Plugin, SettingsType, miscUtils, Configuration, Ident} from '@yarnpkg/core';
 
-import {NpmHttpFetcher}                  from './NpmHttpFetcher';
-import {NpmRemapResolver}                from './NpmRemapResolver';
-import {NpmSemverFetcher}                from './NpmSemverFetcher';
-import {NpmSemverResolver}               from './NpmSemverResolver';
-import {NpmTagResolver}                  from './NpmTagResolver';
-import * as npmConfigUtils               from './npmConfigUtils';
-import * as npmHttpUtils                 from './npmHttpUtils';
-import * as npmPublishUtils              from './npmPublishUtils';
+import {NpmHttpFetcher}                                        from './NpmHttpFetcher';
+import {NpmRemapResolver}                                      from './NpmRemapResolver';
+import {NpmSemverFetcher}                                      from './NpmSemverFetcher';
+import {NpmSemverResolver}                                     from './NpmSemverResolver';
+import {NpmTagResolver}                                        from './NpmTagResolver';
+import * as npmConfigUtils                                     from './npmConfigUtils';
+import * as npmHttpUtils                                       from './npmHttpUtils';
+import * as npmPublishUtils                                    from './npmPublishUtils';
 
 export {npmConfigUtils};
 export {npmHttpUtils};
 export {npmPublishUtils};
+export {NpmHttpFetcher};
+export {NpmRemapResolver};
+export {NpmSemverFetcher};
+export {NpmSemverResolver};
+export {NpmTagResolver};
+
+export interface Hooks {
+  /**
+   * Called when getting the authentication header for a request to the npm registry.
+   * You can use this mechanism to dynamically query a CLI for the credentials for a
+   * specific registry.
+   */
+  getNpmAuthenticationHeader?: (currentHeader: string | undefined, registry: string, {
+    configuration,
+    ident,
+  }: { configuration: Configuration, ident?: Ident }) => Promise<string | undefined>;
+}
+
 
 const authSettings = {
   npmAlwaysAuth: {
@@ -32,6 +50,11 @@ const authSettings = {
 };
 
 const registrySettings = {
+  npmAuditRegistry: {
+    description: `Registry to query for audit reports`,
+    type: SettingsType.STRING as const,
+    default: null,
+  },
   npmPublishRegistry: {
     description: `Registry to push packages to`,
     type: SettingsType.STRING as const,
@@ -50,6 +73,7 @@ declare module '@yarnpkg/core' {
     npmAuthIdent: string | null;
     npmAuthToken: string | null;
 
+    npmAuditRegistry: string | null;
     npmPublishRegistry: string | null;
     npmRegistryServer: string;
 

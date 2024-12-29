@@ -1,10 +1,8 @@
-import {BaseCommand}                         from '@yarnpkg/cli';
-import {Configuration, Manifest, Project}    from '@yarnpkg/core';
-import {execUtils, scriptUtils, structUtils} from '@yarnpkg/core';
-import {xfs, ppath, Filename}                from '@yarnpkg/fslib';
-import {Command, Option, Usage, UsageError}  from 'clipanion';
-import merge                                 from 'lodash/merge';
-import {inspect}                             from 'util';
+import {BaseCommand}                                              from '@yarnpkg/cli';
+import {Configuration, Manifest, miscUtils, Project, YarnVersion} from '@yarnpkg/core';
+import {execUtils, scriptUtils, structUtils}                      from '@yarnpkg/core';
+import {xfs, ppath, Filename}                                     from '@yarnpkg/fslib';
+import {Command, Option, Usage, UsageError}                       from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class InitCommand extends BaseCommand {
@@ -53,22 +51,22 @@ export default class InitCommand extends BaseCommand {
     description: `Initialize a package with a specific bundle that will be locked in the project`,
   });
 
+  name = Option.String(`-n,--name`, {
+    description: `Initialize a package with the given name`,
+  });
+
   // Options that only mattered on v1
   usev2 = Option.Boolean(`-2`, false, {hidden: true});
   yes = Option.Boolean(`-y,--yes`, {hidden: true});
 
-  // Used internally to avoid issues when using `-i`
-  assumeFreshProject = Option.Boolean(`--assume-fresh-project`, false, {hidden: true});
-
   async execute() {
-    if (xfs.existsSync(ppath.join(this.context.cwd, Manifest.fileName)))
-      throw new UsageError(`A package.json already exists in the specified directory`);
-
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
-    const install = this.install
-      ? this.install === true ? `latest` : this.install
-      : null;
+    const install = typeof this.install === `string`
+      ? this.install
+      : this.usev2 || this.install === true
+        ? `latest`
+        : null;
 
     if (install !== null) {
       return await this.executeProxy(configuration, install);
@@ -78,30 +76,27 @@ export default class InitCommand extends BaseCommand {
   }
 
   async executeProxy(configuration: Configuration, version: string) {
-    if (configuration.get(`yarnPath`) !== null)
-      throw new UsageError(`Cannot use the --install flag when the current directory already uses yarnPath (from ${configuration.sources.get(`yarnPath`)})`);
-
-    if (configuration.projectCwd !== null)
-      throw new UsageError(`Cannot use the --install flag when the current directory is already part of a project`);
+    if (configuration.projectCwd !== null && configuration.projectCwd !== this.context.cwd)
+      throw new UsageError(`Cannot use the --install flag from within a project subdirectory`);
 
     if (!xfs.existsSync(this.context.cwd))
       await xfs.mkdirPromise(this.context.cwd, {recursive: true});
 
-    const lockfilePath = ppath.join(this.context.cwd, configuration.get(`lockfileFilename`));
+    const lockfilePath = ppath.join(this.context.cwd, Filename.lockfile);
     if (!xfs.existsSync(lockfilePath))
       await xfs.writeFilePromise(lockfilePath, ``);
 
-    const versionExitCode = await this.cli.run([`set`, `version`, version]);
+    const versionExitCode = await this.cli.run([`set`, `version`, version], {quiet: true});
     if (versionExitCode !== 0)
       return versionExitCode;
 
-    this.context.stdout.write(`\n`);
-
-    const args: Array<string> = [`--assume-fresh-project`];
+    const args: Array<string> = [];
     if (this.private)
       args.push(`-p`);
     if (this.workspace)
       args.push(`-w`);
+    if (this.name)
+      args.push(`-n=${this.name}`);
     if (this.yes)
       args.push(`-y`);
 
@@ -119,28 +114,34 @@ export default class InitCommand extends BaseCommand {
   }
 
   async executeRegular(configuration: Configuration) {
-    let existingProject: {project: Project} | null = null;
-    if (!this.assumeFreshProject) {
-      try {
-        existingProject = await Project.find(configuration, this.context.cwd);
-      } catch {
-        existingProject = null;
-      }
+    let existingProject: Project | null = null;
+    try {
+      existingProject = (await Project.find(configuration, this.context.cwd)).project;
+    } catch {
+      existingProject = null;
     }
 
     if (!xfs.existsSync(this.context.cwd))
       await xfs.mkdirPromise(this.context.cwd, {recursive: true});
 
-    const manifest = new Manifest();
+    const original = await Manifest.tryFind(this.context.cwd);
+    const manifest = original ?? new Manifest();
 
     const fields = Object.fromEntries(configuration.get(`initFields`).entries());
     manifest.load(fields);
 
-    manifest.name = structUtils.makeIdent(configuration.get(`initScope`), ppath.basename(this.context.cwd));
-    manifest.private = this.private || this.workspace;
+    manifest.name = manifest.name
+      ?? structUtils.makeIdent(configuration.get(`initScope`), this.name ?? ppath.basename(this.context.cwd));
 
-    if (this.workspace) {
-      await xfs.mkdirPromise(ppath.join(this.context.cwd, `packages` as Filename), {recursive: true});
+    manifest.packageManager = YarnVersion && miscUtils.isTaggedYarnVersion(YarnVersion)
+      ? `yarn@${YarnVersion}`
+      : null;
+
+    if ((!original && this.workspace) || this.private)
+      manifest.private = true;
+
+    if (this.workspace && manifest.workspaceDefinitions.length === 0) {
+      await xfs.mkdirPromise(ppath.join(this.context.cwd, `packages`), {recursive: true});
       manifest.workspaceDefinitions = [{
         pattern: `packages/*`,
       }];
@@ -149,58 +150,70 @@ export default class InitCommand extends BaseCommand {
     const serialized: any = {};
     manifest.exportTo(serialized);
 
-    // @ts-expect-error: The Node typings forgot one field
-    inspect.styles.name = `cyan`;
-
-    this.context.stdout.write(`${inspect(serialized, {
-      depth: Infinity,
-      colors: true,
-      compact: false,
-    })}\n`);
-
     const manifestPath = ppath.join(this.context.cwd, Manifest.fileName);
-    await xfs.changeFilePromise(manifestPath, `${JSON.stringify(serialized, null, 2)}\n`);
+    await xfs.changeFilePromise(manifestPath, `${JSON.stringify(serialized, null, 2)}\n`, {
+      automaticNewlines: true,
+    });
 
-    const readmePath = ppath.join(this.context.cwd, `README.md` as Filename);
-    if (!xfs.existsSync(readmePath))
+    const changedPaths = [
+      manifestPath,
+    ];
+
+    const readmePath = ppath.join(this.context.cwd, `README.md`);
+    if (!xfs.existsSync(readmePath)) {
       await xfs.writeFilePromise(readmePath, `# ${structUtils.stringifyIdent(manifest.name)}\n`);
+      changedPaths.push(readmePath);
+    }
 
-    if (!existingProject) {
+    if (!existingProject || existingProject.cwd === this.context.cwd) {
       const lockfilePath = ppath.join(this.context.cwd, Filename.lockfile);
-      await xfs.writeFilePromise(lockfilePath, ``);
-
-      const gitattributesLines = [
-        `/.yarn/** linguist-vendored`,
-      ];
-
-      const gitattributesBody = gitattributesLines.map(line => {
-        return `${line}\n`;
-      }).join(``);
-
-      const gitattributesPath = ppath.join(this.context.cwd, `.gitattributes` as Filename);
-      if (!xfs.existsSync(gitattributesPath))
-        await xfs.writeFilePromise(gitattributesPath, gitattributesBody);
+      if (!xfs.existsSync(lockfilePath)) {
+        await xfs.writeFilePromise(lockfilePath, ``);
+        changedPaths.push(lockfilePath);
+      }
 
       const gitignoreLines = [
-        `/.yarn/*`,
-        `!/.yarn/patches`,
-        `!/.yarn/plugins`,
-        `!/.yarn/releases`,
-        `!/.yarn/sdks`,
+        `.yarn/*`,
+        `!.yarn/patches`,
+        `!.yarn/plugins`,
+        `!.yarn/releases`,
+        `!.yarn/sdks`,
+        `!.yarn/versions`,
         ``,
-        `# Swap the comments on the following lines if you don't wish to use zero-installs`,
-        `# Documentation here: https://yarnpkg.com/features/zero-installs`,
-        `!/.yarn/cache`,
-        `#/.pnp.*`,
+        `# Swap the comments on the following lines if you wish to use zero-installs`,
+        `# In that case, don't forget to run \`yarn config set enableGlobalCache false\`!`,
+        `# Documentation here: https://yarnpkg.com/features/caching#zero-installs`,
+        ``,
+        `#!.yarn/cache`,
+        `.pnp.*`,
       ];
 
       const gitignoreBody = gitignoreLines.map(line => {
         return `${line}\n`;
       }).join(``);
 
-      const gitignorePath = ppath.join(this.context.cwd, `.gitignore` as Filename);
-      if (!xfs.existsSync(gitignorePath))
+      const gitignorePath = ppath.join(this.context.cwd, `.gitignore`);
+      if (!xfs.existsSync(gitignorePath)) {
         await xfs.writeFilePromise(gitignorePath, gitignoreBody);
+        changedPaths.push(gitignorePath);
+      }
+
+      const gitattributesLines = [
+        `/.yarn/**            linguist-vendored`,
+        `/.yarn/releases/*    binary`,
+        `/.yarn/plugins/**/*  binary`,
+        `/.pnp.*              binary linguist-generated`,
+      ];
+
+      const gitattributesBody = gitattributesLines.map(line => {
+        return `${line}\n`;
+      }).join(``);
+
+      const gitattributesPath = ppath.join(this.context.cwd, `.gitattributes`);
+      if (!xfs.existsSync(gitattributesPath)) {
+        await xfs.writeFilePromise(gitattributesPath, gitattributesBody);
+        changedPaths.push(gitattributesPath);
+      }
 
       const editorConfigProperties = {
         [`*`]: {
@@ -214,7 +227,7 @@ export default class InitCommand extends BaseCommand {
         },
       };
 
-      merge(editorConfigProperties, configuration.get(`initEditorConfig`));
+      miscUtils.mergeIntoTarget(editorConfigProperties, configuration.get(`initEditorConfig`));
 
       let editorConfigBody = `root = true\n`;
       for (const [selector, props] of Object.entries(editorConfigProperties)) {
@@ -225,13 +238,29 @@ export default class InitCommand extends BaseCommand {
         }
       }
 
-      const editorConfigPath = ppath.join(this.context.cwd, `.editorconfig` as Filename);
-      if (!xfs.existsSync(editorConfigPath))
+      const editorConfigPath = ppath.join(this.context.cwd, `.editorconfig`);
+      if (!xfs.existsSync(editorConfigPath)) {
         await xfs.writeFilePromise(editorConfigPath, editorConfigBody);
+        changedPaths.push(editorConfigPath);
+      }
 
-      await execUtils.execvp(`git`, [`init`], {
-        cwd: this.context.cwd,
+      await this.cli.run([`install`], {
+        quiet: true,
       });
+
+      if (!xfs.existsSync(ppath.join(this.context.cwd, `.git`))) {
+        await execUtils.execvp(`git`, [`init`], {
+          cwd: this.context.cwd,
+        });
+
+        await execUtils.execvp(`git`, [`add`, `--`, ...changedPaths], {
+          cwd: this.context.cwd,
+        });
+
+        await execUtils.execvp(`git`, [`commit`, `--allow-empty`, `-m`, `First commit`], {
+          cwd: this.context.cwd,
+        });
+      }
     }
   }
 }

@@ -4,19 +4,14 @@ on:
   push:
     branches:
     - master
-    paths:
-    - .github/workflows/e2e-nm-berry-workflow.yml
-    - scripts/e2e-setup-ci.sh
-    - packages/yarnpkg-pnpify/sources/hoist.ts
-    - packages/yarnpkg-pnpify/sources/buildNodeModulesTree.ts
-    - packages/plugin-node-modules/sources/NodeModulesLinker.ts
   pull_request:
     paths:
+    - .github/actions/prepare/action.yml
     - .github/workflows/e2e-nm-berry-workflow.yml
     - scripts/e2e-setup-ci.sh
-    - packages/yarnpkg-pnpify/sources/hoist.ts
-    - packages/yarnpkg-pnpify/sources/buildNodeModulesTree.ts
-    - packages/plugin-node-modules/sources/NodeModulesLinker.ts
+    - packages/yarnpkg-nm/sources/hoist.ts
+    - packages/yarnpkg-nm/sources/buildNodeModulesTree.ts
+    - packages/plugin-nm/sources/NodeModulesLinker.ts
 
 name: 'E2E NM Berry Install'
 jobs:
@@ -31,21 +26,13 @@ jobs:
     runs-on: ${{matrix.platform}}
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@v4
 
-    - name: 'Install Node'
-      uses: actions/setup-node@master
-      with:
-        node-version: 14.x
-
-    - name: 'Build the standard bundle'
-      run: |
-        node ./scripts/run-yarn.js build:cli
-      shell: bash
+    - uses: ./.github/actions/prepare
 
     - name: 'Running node_modules install with self-validation'
       run: |
-        source scripts/e2e-setup-ci.sh
+        source scripts/e2e-setup-ci.sh nm
         cd -
-        NM_DEBUG_LEVEL=1 YARN_NODE_LINKER=node-modules yarn
+        NM_DEBUG_LEVEL=1 yarn
       shell: bash

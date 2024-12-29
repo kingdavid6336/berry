@@ -1,5 +1,6 @@
 import {npath, ppath, xfs} from '@yarnpkg/fslib';
 import {spawn}             from 'child_process';
+import {tests}             from 'pkg-tests-core';
 
 describe(`Features`, () => {
   describe(`Editor SDK`, () => {
@@ -20,13 +21,14 @@ describe(`Features`, () => {
         await xfs.writeJsonPromise(manifestPath, {
           name: `eslint`,
           version: `1.0.0`,
+          bin: `./bin/eslint.js`,
           dependencies: {
             [`no-deps`]: `1.0.0`,
           },
         });
 
         await run(`install`);
-        await pnpify([`--sdk`, `base`], path);
+        await sdks([`base`], path);
 
         const rawOutput = await noPnpNode([`./.yarn/sdks/eslint/bin/eslint.js`], path);
         const jsonOutput = JSON.parse(rawOutput);
@@ -57,13 +59,14 @@ describe(`Features`, () => {
         await xfs.writeJsonPromise(manifestPath, {
           name: `eslint`,
           version: `1.0.0`,
+          bin: `./bin/eslint.js`,
           dependencies: {
             [`no-deps`]: `1.0.0`,
           },
         });
 
         await run(`install`);
-        await pnpify([`--sdk`, `base`], path);
+        await sdks([`base`], path);
 
         await run(`install`, {nodeLinker: `node-modules`});
         expect(xfs.existsSync(ppath.join(path, `.pnp.cjs`))).toEqual(false);
@@ -101,7 +104,7 @@ describe(`Features`, () => {
             const timeout = setTimeout(() => {
               cleanup();
               reject(new Error(`Timeout reached without matching "${marker}"; server answered:\n\n${stdall}`));
-            }, 20000);
+            }, tests.TEST_TIMEOUT);
 
             const cleanup = () => {
               clearTimeout(timeout);
@@ -149,8 +152,7 @@ describe(`Features`, () => {
 
           // Same thing, but this file has virtual instances.
           const yarnpkgCli = npath.normalize(npath.join(__dirname, `../../../../yarnpkg-cli/sources/index.ts`))
-            .replace(/\\/g, `/`)
-            .replace(/^\/?/, `/`);
+            .replace(/\\/g, `/`);
 
           // Some sanity check to make sure everything is A-OK
           expect(lodashTypeDef).toContain(`.zip`);
@@ -179,7 +181,6 @@ describe(`Features`, () => {
           child.stdin.end();
         }
       },
-      45000
     );
   });
 });
@@ -215,9 +216,9 @@ const noPnpNode = async (args, cwd) => {
   });
 };
 
-const pnpify = async (args, cwd) => {
+const sdks = async (args, cwd) => {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [require.resolve(`@yarnpkg/monorepo/scripts/run-pnpify.js`), ...args], {
+    const child = spawn(process.execPath, [require.resolve(`@yarnpkg/monorepo/scripts/run-sdks.js`), ...args], {
       cwd: npath.fromPortablePath(cwd),
       stdio: `ignore`,
     });

@@ -1,19 +1,24 @@
 {
   "name": "@yarnpkg/eslint-config",
-  "version": "0.2.0",
+  "version": "2.1.0",
   "license": "BSD-2-Clause",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./react": "./react.js"
+  },
+  "dependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.8.0",
+    "@typescript-eslint/parser": "^7.8.0",
+    "eslint-plugin-arca": "^0.16.0",
+    "eslint-plugin-react": "^7.34.1",
+    "globals": "^15.1.0"
+  },
   "peerDependencies": {
-    "@typescript-eslint/eslint-plugin": "*",
-    "@typescript-eslint/parser": "*",
     "eslint": "*",
-    "eslint-plugin-arca": "*",
-    "eslint-plugin-react": "*",
     "typescript": "*"
   },
   "peerDependenciesMeta": {
-    "eslint-plugin-react": {
-      "optional": true
-    },
     "typescript": {
       "optional": true
     }
@@ -24,6 +29,10 @@
     "directory": "packages/eslint-config"
   },
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
+  "stableVersion": "2.1.0"
 }
