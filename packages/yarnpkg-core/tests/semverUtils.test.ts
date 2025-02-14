@@ -1,3 +1,4 @@
+/* eslint-disable no-restricted-properties */
 import semver           from 'semver';
 
 import * as semverUtils from '../sources/semverUtils';
@@ -43,6 +44,9 @@ const SPECS: Specs = [
   [`1.0.0-rc2`, `1.0.0-rc4`, false],
   [`1.0.0-rc4`, `1.0.0-rc2`, false],
   [`1.0.0-beta.1`, `1.0.0-beta.2`, false],
+
+  // These don't match with our patch but do without it
+  [`<=5.0.0-beta.0`, `5.0.0-alpha.7`, true],
 ];
 
 describe(`semverUtils`, () => {
@@ -66,6 +70,53 @@ describe(`semverUtils`, () => {
 
     it(`should not be obsolete with semver.satisfies(version, range, {includePrerelease: true})`, () => {
       expect(differentResults).toBeGreaterThan(0);
+    });
+  });
+
+  describe(`clean`, () => {
+    const TEST_CASES = [
+      [`1.0.0`, `1.0.0`],
+      [`1.0.0+123`, `1.0.0+123`],
+      [` \t\r\nv=1.0.0+123 \t\r\n`, `1.0.0+123`],
+      [`1.0.0!`, null],
+    ] as const;
+
+    for (const [input, output] of TEST_CASES) {
+      it(`${output ? `should` : `shouldn't`} clean ${JSON.stringify(input)}${
+        output ? ` to ${JSON.stringify(output)}` : ``
+      }`, () => {
+        expect(semverUtils.clean(input)).toEqual(output);
+      });
+    }
+  });
+
+  describe(`simplifyRanges`, () => {
+    it.each([
+      [[`*`], `*`],
+      [[`*`, `^1.5.0`], `^1.5.0`],
+      [[`^1.5.0`, `*`], `^1.5.0`],
+      [[`^1.0.0 || ^2.0.0`, `^1.5.0`, `*`], `^1.5.0`],
+      [[`^1.0.0`], `^1.0.0`],
+      [[`^1.0.0`, `^1.5.0`], `^1.5.0`],
+      [[`^1.0.0`, `^1.5.3`, `^1.5.0`], `^1.5.3`],
+      [[`>=1.0.0`, `<2.0.0-0`], `^1.0.0`],
+      [[`>=1.0.0`, `>=1.5.0`, `<2.0.0-0`], `^1.5.0`],
+      [[`^1.0.0 || ^2.0.0`, `^1.5.0`], `^1.5.0`],
+      [[`^1.0.0 || ^2.0.0`, `^2.5.0`], `^2.5.0`],
+      [[`^1.0.0 || ^2.0.0`, `^1.5.0 || ^2.0.0`, `^1.3.0 || ^2.6.0`], `^1.5.0 || ^2.6.0`],
+      [[`^1.0.0`, `1.5.3`], `1.5.3`],
+      [[`>1.6.0`, `1.5.3`], null],
+      [[`>1.5.3`, `1.5.3`], null],
+      [[`>=1.5.3`, `1.5.3`], `1.5.3`],
+      [[`<1.5.3`, `1.5.3`], null],
+      [[`<=1.5.3`, `1.5.3`], `1.5.3`],
+      [[`1.5.3`, `1.5.3`], `1.5.3`],
+      [[`1.5.0`, `1.5.3`], null],
+      [[`~1.0.1 || ~1.0.2`], `~1.0.1`],
+      [[`~1.0.1 || ~1.0.2`, `~1.0.1 || ~1.0.2`], `~1.0.1`],
+      [(new Array(1000)).fill(`~1.0.1 || ~1.0.2`), `~1.0.1`],
+    ])(`should simplify %s into %s`, (ranges, expected) => {
+      expect(semverUtils.simplifyRanges(ranges)).toEqual(expected);
     });
   });
 });

@@ -1,10 +1,8 @@
 import {miscUtils, semverUtils}                              from '@yarnpkg/core';
-import {FakeFS, ppath, NodeFS, PortablePath}                 from '@yarnpkg/fslib';
+import {FakeFS, ppath, NodeFS, PortablePath, constants}      from '@yarnpkg/fslib';
 
 import {UnmatchedHunkError}                                  from './UnmatchedHunkError';
 import {ParsedPatchFile, FilePatch, Hunk, PatchMutationType} from './parse';
-
-const DEFAULT_TIME = 315532800;
 
 async function preserveTime(baseFs: FakeFS<PortablePath>, p: PortablePath, cb: () => Promise<PortablePath | void>) {
   const stat = await baseFs.lstatPromise(p);
@@ -13,13 +11,7 @@ async function preserveTime(baseFs: FakeFS<PortablePath>, p: PortablePath, cb: (
   if (typeof result !== `undefined`)
     p = result;
 
-  if (baseFs.lutimesPromise) {
-    await baseFs.lutimesPromise(p, stat.atime, stat.mtime);
-  } else if (!stat.isSymbolicLink()) {
-    await baseFs.utimesPromise(p, stat.atime, stat.mtime);
-  } else {
-    throw new Error(`Cannot preserve the time values of a symlink`);
-  }
+  await baseFs.lutimesPromise(p, stat.atime, stat.mtime);
 }
 
 export async function applyPatchFile(effects: ParsedPatchFile, {baseFs = new NodeFS(), dryRun = false, version = null}: {baseFs?: FakeFS<PortablePath>, dryRun?: boolean, version?: string | null} = {}) {
@@ -69,10 +61,10 @@ export async function applyPatchFile(effects: ParsedPatchFile, {baseFs = new Nod
             : ``;
 
           // Todo: the parent of the first directory thus created will still see its mtime changed
-          await baseFs.mkdirpPromise(ppath.dirname(eff.path), {chmod: 0o755, utimes: [DEFAULT_TIME, DEFAULT_TIME]});
+          await baseFs.mkdirpPromise(ppath.dirname(eff.path), {chmod: 0o755, utimes: [constants.SAFE_TIME, constants.SAFE_TIME]});
 
           await baseFs.writeFilePromise(eff.path, fileContents, {mode: eff.mode});
-          await baseFs.utimesPromise(eff.path, DEFAULT_TIME, DEFAULT_TIME);
+          await baseFs.utimesPromise(eff.path, constants.SAFE_TIME, constants.SAFE_TIME);
         }
       } break;
 
@@ -131,7 +123,7 @@ function linesAreEqual(a: string, b: string) {
  *
  * if you edit a file that had a new line and leave it in:
  *
- *    neither insetion nor deletion have the annoation
+ *    neither insertion nor deletion have the annotation
  *
  */
 
@@ -222,19 +214,19 @@ export async function applyPatch({hunks, path}: FilePatch, {baseFs, dryRun = fal
 }
 
 type Push = {
-  type: `push`,
-  line: string,
+  type: `push`;
+  line: string;
 };
 
 type Pop = {
-  type: `pop`,
+  type: `pop`;
 };
 
 type Splice = {
-  type: `splice`,
-  index: number,
-  numToDelete: number,
-  linesToInsert: Array<string>,
+  type: `splice`;
+  index: number;
+  numToDelete: number;
+  linesToInsert: Array<string>;
 };
 
 type Modification =

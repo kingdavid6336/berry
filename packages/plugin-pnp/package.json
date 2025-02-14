@@ -1,26 +1,28 @@
 {
   "name": "@yarnpkg/plugin-pnp",
-  "version": "2.4.0",
+  "version": "4.0.6",
   "license": "BSD-2-Clause",
   "main": "./sources/index.ts",
+  "exports": {
+    ".": "./sources/index.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@types/semver": "^7.1.0",
-    "@yarnpkg/fslib": "workspace:^2.4.0",
-    "@yarnpkg/plugin-stage": "workspace:^2.1.2",
-    "@yarnpkg/pnp": "workspace:^2.3.2",
-    "clipanion": "^3.0.0-rc.10",
+    "@yarnpkg/fslib": "workspace:^",
+    "@yarnpkg/plugin-stage": "workspace:^",
+    "@yarnpkg/pnp": "workspace:^",
+    "clipanion": "^4.0.0-rc.2",
     "micromatch": "^4.0.2",
-    "semver": "^7.1.2",
-    "tslib": "^1.13.0"
+    "tslib": "^2.4.0"
   },
   "peerDependencies": {
-    "@yarnpkg/cli": "^2.4.0",
-    "@yarnpkg/core": "^2.4.0"
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^"
   },
   "devDependencies": {
     "@types/micromatch": "^4.0.1",
-    "@yarnpkg/cli": "workspace:^2.4.0",
-    "@yarnpkg/core": "workspace:^2.4.0"
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^"
   },
   "repository": {
     "type": "git",
@@ -33,12 +35,16 @@
   },
   "publishConfig": {
     "main": "./lib/index.js",
-    "typings": "./lib/index.d.ts"
+    "exports": {
+      ".": "./lib/index.js",
+      "./package.json": "./package.json"
+    }
   },
   "files": [
     "/lib/**/*"
   ],
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "stableVersion": "4.0.6"
 }

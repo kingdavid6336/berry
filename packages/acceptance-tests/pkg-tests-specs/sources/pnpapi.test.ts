@@ -20,7 +20,7 @@ describe(`Plug'n'Play API`, () => {
       makeTemporaryEnv({}, async ({path, run, source}) => {
         await run(`install`);
 
-        await expect(source(`require('pnpapi').findPackageLocator('${npath.fromPortablePath(ppath.dirname(path))}/')`)).resolves.toEqual(null);
+        await expect(source(`require('pnpapi').findPackageLocator(${JSON.stringify(`${npath.fromPortablePath(ppath.dirname(path))}/`)})`)).resolves.toEqual(null);
       }),
     );
 
@@ -139,8 +139,8 @@ describe(`Plug'n'Play API`, () => {
             `packages/*`,
           ],
         }, async ({path, run, source}) => {
-          await xfs.mkdirpPromise(ppath.join(path, `packages/foo` as PortablePath));
-          await xfs.writeJsonPromise(ppath.join(path, `packages/foo/package.json` as PortablePath), {
+          await xfs.mkdirpPromise(ppath.join(path, `packages/foo`));
+          await xfs.writeJsonPromise(ppath.join(path, `packages/foo/package.json`), {
             name: `foo`,
             dependencies: {
               [`bar`]: `workspace:*`,
@@ -148,8 +148,8 @@ describe(`Plug'n'Play API`, () => {
             },
           });
 
-          await xfs.mkdirpPromise(ppath.join(path, `packages/bar` as PortablePath));
-          await xfs.writeJsonPromise(ppath.join(path, `packages/bar/package.json` as PortablePath), {
+          await xfs.mkdirpPromise(ppath.join(path, `packages/bar`));
+          await xfs.writeJsonPromise(ppath.join(path, `packages/bar/package.json`), {
             name: `bar`,
             peerDependencies: {
               [`no-deps`]: `1.0.0`,
@@ -182,8 +182,8 @@ describe(`Plug'n'Play API`, () => {
             `packages/*`,
           ],
         }, async ({path, run, source}) => {
-          await xfs.mkdirpPromise(ppath.join(path, `packages/foo` as PortablePath));
-          await xfs.writeJsonPromise(ppath.join(path, `packages/foo/package.json` as PortablePath), {
+          await xfs.mkdirpPromise(ppath.join(path, `packages/foo`));
+          await xfs.writeJsonPromise(ppath.join(path, `packages/foo/package.json`), {
             name: `foo`,
             dependencies: {
               [`bar`]: `workspace:*`,
@@ -191,8 +191,8 @@ describe(`Plug'n'Play API`, () => {
             },
           });
 
-          await xfs.mkdirpPromise(ppath.join(path, `packages/bar` as PortablePath));
-          await xfs.writeJsonPromise(ppath.join(path, `packages/bar/package.json` as PortablePath), {
+          await xfs.mkdirpPromise(ppath.join(path, `packages/bar`));
+          await xfs.writeJsonPromise(ppath.join(path, `packages/bar/package.json`), {
             name: `bar`,
             peerDependencies: {
               [`no-deps`]: `1.0.0`,
@@ -234,7 +234,20 @@ describe(`Plug'n'Play API`, () => {
           await run(`install`);
 
           await expect(
-            source(`require('pnpapi').resolveRequest('fs', ${JSON.stringify(`${npath.fromPortablePath(path)}/`)})`)
+            source(`require('pnpapi').resolveRequest('fs', ${JSON.stringify(`${npath.fromPortablePath(path)}/`)})`),
+          ).resolves.toEqual(
+            null,
+          );
+        }),
+      );
+
+      test(
+        `it should return null for builtins ('node:' protocol)`,
+        makeTemporaryEnv({}, async ({path, run, source}) => {
+          await run(`install`);
+
+          await expect(
+            source(`require('pnpapi').resolveRequest('node:fs', ${JSON.stringify(`${npath.fromPortablePath(path)}/`)})`),
           ).resolves.toEqual(
             null,
           );
@@ -323,7 +336,7 @@ describe(`Plug'n'Play API`, () => {
           await run(`install`);
 
           const reference = await source(
-            `require('pnpapi').getPackageInformation({name: null, reference: null}).packageDependencies.get('no-deps')`
+            `require('pnpapi').getPackageInformation({name: null, reference: null}).packageDependencies.get('no-deps')`,
           );
 
           await expect(
@@ -344,7 +357,7 @@ describe(`Plug'n'Play API`, () => {
           await run(`install`);
 
           const reference = await source(
-            `require('pnpapi').getPackageInformation({name: null, reference: null}).packageDependencies.get('self')`
+            `require('pnpapi').getPackageInformation({name: null, reference: null}).packageDependencies.get('self')`,
           );
 
           await expect(
@@ -428,7 +441,7 @@ describe(`Plug'n'Play API`, () => {
           const virtualPath = await source(`require.resolve('peer-deps')`);
 
           // Sanity check: to ensure that the test actually tests something :)
-          expect(virtualPath).toMatch(`${npath.sep}$$virtual${npath.sep}`);
+          expect(virtualPath).toMatch(`${npath.sep}__virtual__${npath.sep}`);
 
           const physicalPath = await source(`require('pnpapi').resolveVirtual(require.resolve('peer-deps'))`);
 

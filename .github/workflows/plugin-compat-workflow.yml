@@ -4,9 +4,11 @@ on:
     - master
     paths:
     - 'packages/plugin-compat/**'
+    - '!packages/plugin-compat/sources/extensions.ts'
   pull_request:
     paths:
     - 'packages/plugin-compat/**'
+    - '!packages/plugin-compat/sources/extensions.ts'
 
 name: 'plugin-compat'
 jobs:
@@ -15,16 +17,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@v4
 
-    - name: 'Install Node'
-      uses: actions/setup-node@master
-      with:
-        node-version: 14.x
-
-    - name: 'Build the standard bundle'
-      run: |
-        node ./scripts/run-yarn.js build:cli
+    - uses: ./.github/actions/prepare
 
     - name: 'Run the plugin-compat tests'
       run: |

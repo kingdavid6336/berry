@@ -1,29 +1,17 @@
-import {Resolver, ResolveOptions, MinimalResolveOptions} from '@yarnpkg/core';
-import {Descriptor, Locator, Manifest}                   from '@yarnpkg/core';
-import {LinkType}                                        from '@yarnpkg/core';
-import {miscUtils, structUtils}                          from '@yarnpkg/core';
+import {Resolver, ResolveOptions, MinimalResolveOptions, Package} from '@yarnpkg/core';
+import {Descriptor, Locator, Manifest}                            from '@yarnpkg/core';
+import {LinkType}                                                 from '@yarnpkg/core';
+import {miscUtils, structUtils}                                   from '@yarnpkg/core';
 
-import {PROTOCOL_REGEXP, TARBALL_REGEXP}                 from './constants';
+import * as urlUtils                                              from './urlUtils';
 
 export class TarballHttpResolver implements Resolver {
   supportsDescriptor(descriptor: Descriptor, opts: MinimalResolveOptions) {
-    if (!TARBALL_REGEXP.test(descriptor.range))
-      return false;
-
-    if (PROTOCOL_REGEXP.test(descriptor.range))
-      return true;
-
-    return false;
+    return urlUtils.isTgzUrl(descriptor.range);
   }
 
   supportsLocator(locator: Locator, opts: MinimalResolveOptions) {
-    if (!TARBALL_REGEXP.test(locator.reference))
-      return false;
-
-    if (PROTOCOL_REGEXP.test(locator.reference))
-      return true;
-
-    return false;
+    return urlUtils.isTgzUrl(locator.reference);
   }
 
   shouldPersistResolution(locator: Locator, opts: MinimalResolveOptions) {
@@ -35,15 +23,20 @@ export class TarballHttpResolver implements Resolver {
   }
 
   getResolutionDependencies(descriptor: Descriptor, opts: MinimalResolveOptions) {
-    return [];
+    return {};
   }
 
   async getCandidates(descriptor: Descriptor, dependencies: unknown, opts: ResolveOptions) {
     return [structUtils.convertDescriptorToLocator(descriptor)];
   }
 
-  async getSatisfying(descriptor: Descriptor, references: Array<string>, opts: ResolveOptions) {
-    return null;
+  async getSatisfying(descriptor: Descriptor, dependencies: Record<string, Package>, locators: Array<Locator>, opts: ResolveOptions) {
+    const [locator] = await this.getCandidates(descriptor, dependencies, opts);
+
+    return {
+      locators: locators.filter(candidate => candidate.locatorHash === locator.locatorHash),
+      sorted: false,
+    };
   }
 
   async resolve(locator: Locator, opts: ResolveOptions) {
@@ -61,10 +54,12 @@ export class TarballHttpResolver implements Resolver {
 
       version: manifest.version || `0.0.0`,
 
-      languageName: opts.project.configuration.get(`defaultLanguageName`),
+      languageName: manifest.languageName || opts.project.configuration.get(`defaultLanguageName`),
       linkType: LinkType.HARD,
 
-      dependencies: manifest.dependencies,
+      conditions: manifest.getConditions(),
+
+      dependencies: opts.project.configuration.normalizeDependencyMap(manifest.dependencies),
       peerDependencies: manifest.peerDependencies,
 
       dependenciesMeta: manifest.dependenciesMeta,

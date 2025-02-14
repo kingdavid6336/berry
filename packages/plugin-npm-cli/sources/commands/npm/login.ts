@@ -1,10 +1,10 @@
-import {BaseCommand, openWorkspace}                    from '@yarnpkg/cli';
-import {Configuration, MessageName, Report, miscUtils} from '@yarnpkg/core';
-import {StreamReport}                                  from '@yarnpkg/core';
-import {PortablePath}                                  from '@yarnpkg/fslib';
-import {npmConfigUtils, npmHttpUtils}                  from '@yarnpkg/plugin-npm';
-import {Command, Option, Usage}                        from 'clipanion';
-import {prompt}                                        from 'enquirer';
+import {BaseCommand, openWorkspace}                                 from '@yarnpkg/cli';
+import {Configuration, MessageName, Report, miscUtils, formatUtils} from '@yarnpkg/core';
+import {StreamReport}                                               from '@yarnpkg/core';
+import {PortablePath}                                               from '@yarnpkg/fslib';
+import {npmConfigUtils, npmHttpUtils}                               from '@yarnpkg/plugin-npm';
+import {Command, Option, Usage}                                     from 'clipanion';
+import {prompt}                                                     from 'enquirer';
 
 // eslint-disable-next-line arca/no-default-export
 export default class NpmLoginCommand extends BaseCommand {
@@ -42,6 +42,10 @@ export default class NpmLoginCommand extends BaseCommand {
     description: `Login to the publish registry`,
   });
 
+  alwaysAuth = Option.Boolean(`--always-auth`, {
+    description: `Set the npmAlwaysAuth configuration`,
+  });
+
   async execute() {
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
@@ -55,24 +59,19 @@ export default class NpmLoginCommand extends BaseCommand {
     const report = await StreamReport.start({
       configuration,
       stdout: this.context.stdout,
+      includeFooter: false,
     }, async report => {
       const credentials = await getCredentials({
+        configuration,
         registry,
         report,
         stdin: this.context.stdin as NodeJS.ReadStream,
         stdout: this.context.stdout as NodeJS.WriteStream,
       });
 
-      const url = `/-/user/org.couchdb.user:${encodeURIComponent(credentials.name)}`;
-      const response = await npmHttpUtils.put(url, credentials, {
-        attemptedAs: credentials.name,
-        configuration,
-        registry,
-        jsonResponse: true,
-        authType: npmHttpUtils.AuthType.NO_AUTH,
-      }) as any;
+      const token = await registerOrLogin(registry, credentials, configuration);
 
-      await setAuthToken(registry, response.token, {configuration, scope: this.scope});
+      await setAuthToken(registry, token, {alwaysAuth: this.alwaysAuth, scope: this.scope});
       return report.reportInfo(MessageName.UNNAMED, `Successfully logged in`);
     });
 
@@ -93,7 +92,75 @@ export async function getRegistry({scope, publish, configuration, cwd}: {scope?:
   return npmConfigUtils.getDefaultRegistry({configuration});
 }
 
-async function setAuthToken(registry: string, npmAuthToken: string, {configuration, scope}: {configuration: Configuration, scope?: string}) {
+/**
+ * Register a new user, or login if the user already exists
+ */
+async function registerOrLogin(registry: string, credentials: Credentials, configuration: Configuration): Promise<string> {
+  // Registration and login are both handled as a `put` by npm. Npm uses a lax
+  // endpoint as of 2023-11 where there are no conflicts if the user already
+  // exists, but some registries such as Verdaccio are stricter and return a
+  // `409 Conflict` status code for existing users. In this case, the client
+  // should put a user revision for this specific session (with basic HTTP
+  // auth).
+  //
+  // The code below is based on the logic from the npm client.
+  // <https://github.com/npm/npm-profile/blob/30097a5eef4239399b964c2efc121e64e75ecaf5/lib/index.js#L156>.
+  const userUrl = `/-/user/org.couchdb.user:${encodeURIComponent(credentials.name)}`;
+
+  const body: Record<string, unknown> = {
+    _id: `org.couchdb.user:${credentials.name}`,
+    name: credentials.name,
+    password: credentials.password,
+    type: `user`,
+    roles: [],
+    date: new Date().toISOString(),
+  };
+
+  const userOptions = {
+    attemptedAs: credentials.name,
+    configuration,
+    registry,
+    jsonResponse: true,
+    authType: npmHttpUtils.AuthType.NO_AUTH,
+  };
+
+  try {
+    const response = await npmHttpUtils.put(userUrl, body, userOptions) as any;
+    return response.token;
+  } catch (error) {
+    const isConflict = error.originalError?.name === `HTTPError` && error.originalError?.response.statusCode === 409;
+    if (!isConflict) {
+      throw error;
+    }
+  }
+
+  // At this point we did a first request but got a `409 Conflict`. Retrieve
+  // the latest state and put a new revision.
+  const revOptions = {
+    ...userOptions,
+    authType: npmHttpUtils.AuthType.NO_AUTH,
+    headers: {
+      authorization: `Basic ${Buffer.from(`${credentials.name}:${credentials.password}`).toString(`base64`)}`,
+    },
+  };
+
+  const user = await npmHttpUtils.get(userUrl, revOptions);
+
+  // Update the request body to include the latest fields (such as `_rev`) and
+  // the latest `roles` value.
+  for (const [k, v] of Object.entries(user)) {
+    if (!body[k] || k === `roles`) {
+      body[k] = v;
+    }
+  }
+
+  const revisionUrl = `${userUrl}/-rev/${body._rev}`;
+  const response = await npmHttpUtils.put(revisionUrl, body, revOptions) as any;
+
+  return response.token;
+}
+
+async function setAuthToken(registry: string, npmAuthToken: string, {alwaysAuth, scope}: {alwaysAuth?: boolean, scope?: string}) {
   const makeUpdater = (entryName: string) => (unknownStore: unknown) => {
     const store = miscUtils.isIndexableObject(unknownStore)
       ? unknownStore
@@ -108,6 +175,7 @@ async function setAuthToken(registry: string, npmAuthToken: string, {configurati
       ...store,
       [entryName]: {
         ...entry,
+        ...(alwaysAuth !== undefined ? {npmAlwaysAuth: alwaysAuth} : {}),
         npmAuthToken,
       },
     };
@@ -120,15 +188,13 @@ async function setAuthToken(registry: string, npmAuthToken: string, {configurati
   return await Configuration.updateHomeConfiguration(update);
 }
 
-async function getCredentials({registry, report, stdin, stdout}: {registry: string, report: Report, stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream}) {
-  if (process.env.TEST_ENV) {
-    return {
-      name: process.env.TEST_NPM_USER || ``,
-      password: process.env.TEST_NPM_PASSWORD || ``,
-    };
-  }
+interface Credentials {
+  name: string;
+  password: string;
+}
 
-  report.reportInfo(MessageName.UNNAMED, `Logging in to ${registry}`);
+async function getCredentials({configuration, registry, report, stdin, stdout}: {configuration: Configuration, registry: string, report: Report, stdin: NodeJS.ReadStream, stdout: NodeJS.WriteStream}): Promise<Credentials> {
+  report.reportInfo(MessageName.UNNAMED, `Logging in to ${formatUtils.pretty(configuration, registry, formatUtils.Type.URL)}`);
 
   let isToken = false;
 
@@ -139,12 +205,16 @@ async function getCredentials({registry, report, stdin, stdout}: {registry: stri
 
   report.reportSeparator();
 
-  const {username, password} = await prompt<{
-    username: string,
-    password: string,
-  }>([{
+  if (configuration.env.YARN_IS_TEST_ENV) {
+    return {
+      name: configuration.env.YARN_INJECT_NPM_USER || ``,
+      password: configuration.env.YARN_INJECT_NPM_PASSWORD || ``,
+    };
+  }
+
+  const credentials = await prompt<Credentials>([{
     type: `input`,
-    name: `username`,
+    name: `name`,
     message: `Username:`,
     required: true,
     onCancel: () => process.exit(130),
@@ -162,8 +232,5 @@ async function getCredentials({registry, report, stdin, stdout}: {registry: stri
 
   report.reportSeparator();
 
-  return {
-    name: username,
-    password,
-  };
+  return credentials;
 }

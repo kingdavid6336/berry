@@ -1,37 +1,99 @@
-import {Filename, FakeFS, PortablePath, ZipCompression, ZipFS, NodeFS, ppath, xfs, npath} from '@yarnpkg/fslib';
-import {getLibzipPromise}                                                                 from '@yarnpkg/libzip';
-import {PassThrough, Readable}                                                            from 'stream';
-import tar                                                                                from 'tar';
+import {Configuration, nodeUtils}                                              from '@yarnpkg/core';
+import {FakeFS, PortablePath, NodeFS, ppath, xfs, npath, constants, statUtils} from '@yarnpkg/fslib';
+import {ZipCompression, ZipFS}                                                 from '@yarnpkg/libzip';
+import {PassThrough, Readable}                                                 from 'stream';
+import tar                                                                     from 'tar';
 
-import * as miscUtils                                                                     from './miscUtils';
+import {AsyncPool, TaskPool, WorkerPool}                                       from './TaskPool';
+import * as miscUtils                                                          from './miscUtils';
+import {getContent as getZipWorkerSource}                                      from './worker-zip';
 
-interface MakeArchiveFromDirectoryOptions {
-  baseFs?: FakeFS<PortablePath>,
-  prefixPath?: PortablePath | null,
-  compressionLevel?: ZipCompression,
-  inMemory?: boolean,
+export type ConvertToZipPayload = {
+  tmpFile: PortablePath;
+  tgz: Buffer | Uint8Array;
+  extractBufferOpts: ExtractBufferOptions;
+  compressionLevel: ZipCompression;
+};
+
+export type ZipWorkerPool = TaskPool<ConvertToZipPayload, PortablePath>;
+
+function createTaskPool(poolMode: string, poolSize: number): ZipWorkerPool {
+  switch (poolMode) {
+    case `async`:
+      return new AsyncPool(convertToZipWorker, {poolSize});
+
+    case `workers`:
+      return new WorkerPool(getZipWorkerSource(), {poolSize});
+
+    default: {
+      throw new Error(`Assertion failed: Unknown value ${poolMode} for taskPoolMode`);
+    }
+  }
 }
 
-// 1984-06-22T21:50:00.000Z
-//
-// It needs to be after 1980-01-01 because that's what Zip supports, and it
-// needs to have a slight offset to account for different timezones (because
-// zip assumes that all times are local to whoever writes the file, which is
-// really silly).
-//
-export const safeTime = 456789000;
+let defaultWorkerPool: ZipWorkerPool | undefined;
+
+export function getDefaultTaskPool() {
+  if (typeof defaultWorkerPool === `undefined`)
+    defaultWorkerPool = createTaskPool(`workers`, nodeUtils.availableParallelism());
+
+  return defaultWorkerPool;
+}
+
+const workerPools = new WeakMap<Configuration, ZipWorkerPool>();
+
+export function getTaskPoolForConfiguration(configuration: Configuration | void): ZipWorkerPool {
+  if (typeof configuration === `undefined`)
+    return getDefaultTaskPool();
+
+  return miscUtils.getFactoryWithDefault(workerPools, configuration, () => {
+    const poolMode = configuration.get(`taskPoolMode`);
+    const poolSize = configuration.get(`taskPoolConcurrency`);
+
+    switch (poolMode) {
+      case `async`:
+        return new AsyncPool(convertToZipWorker, {poolSize});
+
+      case `workers`:
+        return new WorkerPool(getZipWorkerSource(), {poolSize});
+
+      default: {
+        throw new Error(`Assertion failed: Unknown value ${poolMode} for taskPoolMode`);
+      }
+    }
+  });
+}
+
+export async function convertToZipWorker(data: ConvertToZipPayload) {
+  const {tmpFile, tgz, compressionLevel, extractBufferOpts} = data;
+
+  const zipFs = new ZipFS(tmpFile, {create: true, level: compressionLevel, stats: statUtils.makeDefaultStats()});
+
+  // Buffers sent through Node are turned into regular Uint8Arrays
+  const tgzBuffer = Buffer.from(tgz.buffer, tgz.byteOffset, tgz.byteLength);
+  await extractArchiveTo(tgzBuffer, zipFs, extractBufferOpts);
+
+  zipFs.saveAndClose();
+
+  return tmpFile;
+}
+
+export interface MakeArchiveFromDirectoryOptions {
+  baseFs?: FakeFS<PortablePath>;
+  prefixPath?: PortablePath | null;
+  compressionLevel?: ZipCompression;
+  inMemory?: boolean;
+}
 
 export async function makeArchiveFromDirectory(source: PortablePath, {baseFs = new NodeFS(), prefixPath = PortablePath.root, compressionLevel, inMemory = false}: MakeArchiveFromDirectoryOptions = {}): Promise<ZipFS> {
-  const libzip = await getLibzipPromise();
-
   let zipFs;
   if (inMemory) {
-    zipFs = new ZipFS(null, {libzip, level: compressionLevel});
+    zipFs = new ZipFS(null, {level: compressionLevel});
   } else {
     const tmpFolder = await xfs.mktempPromise();
-    const tmpFile = ppath.join(tmpFolder, `archive.zip` as Filename);
+    const tmpFile = ppath.join(tmpFolder, `archive.zip`);
 
-    zipFs = new ZipFS(tmpFile, {create: true, libzip, level: compressionLevel});
+    zipFs = new ZipFS(tmpFile, {create: true, level: compressionLevel});
   }
 
   const target = ppath.resolve(PortablePath.root, prefixPath!);
@@ -40,18 +102,34 @@ export async function makeArchiveFromDirectory(source: PortablePath, {baseFs = n
   return zipFs;
 }
 
-interface ExtractBufferOptions {
-  compressionLevel?: ZipCompression,
-  prefixPath?: PortablePath,
-  stripComponents?: number,
+export interface ExtractBufferOptions {
+  prefixPath?: PortablePath;
+  stripComponents?: number;
 }
 
-export async function convertToZip(tgz: Buffer, opts: ExtractBufferOptions) {
-  const tmpFolder = await xfs.mktempPromise();
-  const tmpFile = ppath.join(tmpFolder, `archive.zip` as Filename);
-  const {compressionLevel, ...bufferOpts} = opts;
+export interface ConvertToZipOptions extends ExtractBufferOptions {
+  configuration?: Configuration;
+  compressionLevel?: ZipCompression;
+  taskPool?: ZipWorkerPool;
+}
 
-  return await extractArchiveTo(tgz, new ZipFS(tmpFile, {create: true, libzip: await getLibzipPromise(), level: compressionLevel}), bufferOpts);
+export async function convertToZip(tgz: Buffer, opts: ConvertToZipOptions = {}) {
+  const tmpFolder = await xfs.mktempPromise();
+  const tmpFile = ppath.join(tmpFolder, `archive.zip`);
+
+  const compressionLevel = opts.compressionLevel
+    ?? opts.configuration?.get(`compressionLevel`)
+    ?? `mixed`;
+
+  const extractBufferOpts: ExtractBufferOptions = {
+    prefixPath: opts.prefixPath,
+    stripComponents: opts.stripComponents,
+  };
+
+  const taskPool = opts.taskPool ?? getTaskPoolForConfiguration(opts.configuration);
+  await taskPool.run({tmpFile, tgz, compressionLevel, extractBufferOpts});
+
+  return new ZipFS(tmpFile, {level: opts.compressionLevel});
 }
 
 async function * parseTar(tgz: Buffer) {
@@ -69,7 +147,9 @@ async function * parseTar(tgz: Buffer) {
   });
 
   parser.on(`close`, () => {
-    passthrough.destroy();
+    if (!passthrough.destroyed) {
+      passthrough.end();
+    }
   });
 
   parser.end(tgz);
@@ -118,27 +198,25 @@ export async function extractArchiveTo<T extends FakeFS<PortablePath>>(tgz: Buff
 
     switch (entry.type) {
       case `Directory`: {
-        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [safeTime, safeTime]});
+        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [constants.SAFE_TIME, constants.SAFE_TIME]});
 
-        targetFs.mkdirSync(mappedPath);
-        targetFs.chmodSync(mappedPath, mode);
-        targetFs.utimesSync(mappedPath, safeTime, safeTime);
+        targetFs.mkdirSync(mappedPath, {mode});
+        targetFs.utimesSync(mappedPath, constants.SAFE_TIME, constants.SAFE_TIME);
       } break;
 
       case `OldFile`:
       case `File`: {
-        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [safeTime, safeTime]});
+        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [constants.SAFE_TIME, constants.SAFE_TIME]});
 
-        targetFs.writeFileSync(mappedPath, await miscUtils.bufferStream(entry as unknown as Readable));
-        targetFs.chmodSync(mappedPath, mode);
-        targetFs.utimesSync(mappedPath, safeTime, safeTime);
+        targetFs.writeFileSync(mappedPath, await miscUtils.bufferStream(entry as unknown as Readable), {mode});
+        targetFs.utimesSync(mappedPath, constants.SAFE_TIME, constants.SAFE_TIME);
       } break;
 
       case `SymbolicLink`: {
-        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [safeTime, safeTime]});
+        targetFs.mkdirpSync(ppath.dirname(mappedPath), {chmod: 0o755, utimes: [constants.SAFE_TIME, constants.SAFE_TIME]});
 
         targetFs.symlinkSync((entry as any).linkpath, mappedPath);
-        targetFs.lutimesSync?.(mappedPath, safeTime, safeTime);
+        targetFs.lutimesSync(mappedPath, constants.SAFE_TIME, constants.SAFE_TIME);
       } break;
     }
   }

@@ -1,9 +1,9 @@
+const {xfs} = require(`@yarnpkg/fslib`);
 const {
-  fs: {writeFile, realpath},
-  tests: {setPackageWhitelist, startPackageServer},
+  fs: {writeFile},
+  tests: {setPackageWhitelist, startPackageServer, validLogins},
+  yarn,
 } = require(`pkg-tests-core`);
-
-const AUTH_TOKEN = `686159dc-64b3-413e-a244-2de2b8d1c36f`;
 
 describe(`Commands`, () => {
   describe(`dlx`, () => {
@@ -78,13 +78,13 @@ describe(`Commands`, () => {
           `npmScopes:`,
           `  private:`,
           `    npmRegistryServer: "${url}"`,
-          `    npmAuthToken: ${AUTH_TOKEN}`,
+          `    npmAuthToken: ${validLogins.fooUser.npmAuthToken}`,
         ].join(`\n`));
 
         await expect(run(`dlx`, `-q`, `@private/has-bin-entry`)).resolves.toMatchObject({
           stdout: `1.0.0\n`,
         });
-      })
+      }),
     );
 
     test(
@@ -94,18 +94,18 @@ describe(`Commands`, () => {
 
         await writeFile(`${path}/.yarnrc.yml`, [
           `plugins:`,
-          `  - ${JSON.stringify(require.resolve(`@yarnpkg/monorepo/scripts/plugin-version.js`))}`,
+          `  - ${JSON.stringify(require.resolve(`@yarnpkg/monorepo/scripts/plugin-hello-world.js`))}`,
           `npmScopes:`,
           `  private:`,
           `    npmRegistryServer: "${url}"`,
-          `    npmAuthToken: ${AUTH_TOKEN}`,
+          `    npmAuthToken: ${validLogins.fooUser.npmAuthToken}`,
           `preferDeferredVersions: true`,
         ].join(`\n`));
 
         await expect(run(`dlx`, `-q`, `@private/has-bin-entry`)).resolves.toMatchObject({
           stdout: `1.0.0\n`,
         });
-      })
+      }),
     );
 
     test(
@@ -113,22 +113,22 @@ describe(`Commands`, () => {
       makeTemporaryEnv({}, async ({path, run, source}) => {
         const url = await startPackageServer();
 
-        const relativePluginPath = require.resolve(`@yarnpkg/monorepo/scripts/plugin-version.js`);
+        const relativePluginPath = require.resolve(`@yarnpkg/monorepo/scripts/plugin-hello-world.js`);
 
         await writeFile(`${path}/.yarnrc.yml`, [
           `plugins:`,
-          `  - ${await realpath(relativePluginPath)}`,
+          `  - ${await xfs.realpathPromise(relativePluginPath)}`,
           `npmScopes:`,
           `  private:`,
           `    npmRegistryServer: "${url}"`,
-          `    npmAuthToken: ${AUTH_TOKEN}`,
+          `    npmAuthToken: ${validLogins.fooUser.npmAuthToken}`,
           `preferDeferredVersions: true`,
         ].join(`\n`));
 
         await expect(run(`dlx`, `-q`, `@private/has-bin-entry`)).resolves.toMatchObject({
           stdout: `1.0.0\n`,
         });
-      })
+      }),
     );
 
     test(
@@ -138,19 +138,109 @@ describe(`Commands`, () => {
 
         await writeFile(`${path}/.yarnrc.yml`, [
           `plugins:`,
-          `  - path: ${JSON.stringify(require.resolve(`@yarnpkg/monorepo/scripts/plugin-version.js`))}`,
-          `    spec: "@yarnpkg/plugin-version"`,
+          `  - path: ${JSON.stringify(require.resolve(`@yarnpkg/monorepo/scripts/plugin-hello-world.js`))}`,
+          `    spec: "@yarnpkg/plugin-hello-world"`,
           `npmScopes:`,
           `  private:`,
           `    npmRegistryServer: "${url}"`,
-          `    npmAuthToken: ${AUTH_TOKEN}`,
+          `    npmAuthToken: ${validLogins.fooUser.npmAuthToken}`,
           `preferDeferredVersions: true`,
         ].join(`\n`));
 
         await expect(run(`dlx`, `-q`, `@private/has-bin-entry`)).resolves.toMatchObject({
           stdout: `1.0.0\n`,
         });
-      })
+      }),
+    );
+
+    test(
+      `it should use the exact tag specified`,
+      makeTemporaryEnv({}, async ({path, run, source}) => {
+        await expect(run(`dlx`, `-p`, `has-bin-entries`, `-p`, `no-deps-tags@rc`, `has-bin-entries`)).resolves.toMatchObject({
+          stdout: expect.stringContaining(`no-deps-tags@npm:1.0.0-rc.1`),
+        });
+      }),
+    );
+
+    test(
+      `it shouldn't warn on unused package extensions in projects created by dlx (dependencies)`,
+      makeTemporaryEnv(
+        {
+          dependencies: {
+            [`various-requires`]: `1.0.0`,
+          },
+        },
+        async ({path, run, source}) => {
+          await yarn.writeConfiguration(path, {
+            packageExtensions: {
+              [`various-requires@*`]: {
+                dependencies: {
+                  [`no-deps`]: `1.0.0`,
+                },
+              },
+            },
+          });
+
+          await expect(run(`dlx`, `has-bin-entries`)).resolves.toMatchObject({
+            stdout: expect.not.stringContaining(`YN0068`),
+          });
+        },
+      ),
+    );
+
+    test(
+      `it shouldn't warn on unused package extensions in projects created by dlx (peerDependencies)`,
+      makeTemporaryEnv(
+        {
+          dependencies: {
+            [`no-deps`]: `2.0.0`,
+            [`various-requires`]: `1.0.0`,
+          },
+        },
+        async ({path, run, source}) => {
+          await yarn.writeConfiguration(path, {
+            packageExtensions: {
+              [`various-requires@*`]: {
+                peerDependencies: {
+                  [`no-deps`]: `*`,
+                },
+              },
+            },
+          });
+
+          await expect(run(`dlx`, `has-bin-entries`)).resolves.toMatchObject({
+            stdout: expect.not.stringContaining(`YN0068`),
+          });
+        },
+      ),
+    );
+
+    test(
+      `it shouldn't warn on unused package extensions in projects created by dlx (peerDependenciesMeta)`,
+      makeTemporaryEnv(
+        {
+          dependencies: {
+            [`optional-peer-deps`]: `1.0.0`,
+          },
+        },
+        async ({path, run, source}) => {
+          await yarn.writeConfiguration(path, {
+            packageExtensions: {
+              [`optional-peer-deps@*`]: {
+                peerDependenciesMeta: {
+                  [`no-deps`]: {
+                    optional: true,
+                  },
+                },
+              },
+            },
+          });
+
+          await expect(run(`dlx`, `has-bin-entries`)).resolves.toMatchObject({
+            stdout: expect.not.stringContaining(`YN0068`),
+          });
+        },
+      ),
     );
   });
 });

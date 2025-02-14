@@ -1,8 +1,14 @@
 import {Resolver, ResolveOptions, MinimalResolveOptions} from './Resolver';
 import * as structUtils                                  from './structUtils';
-import {Descriptor, Locator}                             from './types';
+import {Descriptor, Locator, Package}                    from './types';
 
 export class LockfileResolver implements Resolver {
+  private readonly resolver: Resolver;
+
+  constructor(resolver: Resolver) {
+    this.resolver = resolver;
+  }
+
   supportsDescriptor(descriptor: Descriptor, opts: MinimalResolveOptions) {
     const resolution = opts.project.storedResolutions.get(descriptor.descriptorHash);
     if (resolution)
@@ -17,7 +23,7 @@ export class LockfileResolver implements Resolver {
   }
 
   supportsLocator(locator: Locator, opts: MinimalResolveOptions) {
-    if (opts.project.originalPackages.has(locator.locatorHash))
+    if (opts.project.originalPackages.has(locator.locatorHash) && !opts.project.lockfileNeedsRefresh)
       return true;
 
     return false;
@@ -32,32 +38,36 @@ export class LockfileResolver implements Resolver {
   }
 
   getResolutionDependencies(descriptor: Descriptor, opts: MinimalResolveOptions) {
-    return [];
+    return this.resolver.getResolutionDependencies(descriptor, opts);
   }
 
   async getCandidates(descriptor: Descriptor, dependencies: unknown, opts: ResolveOptions) {
-    let pkg = opts.project.originalPackages.get(structUtils.convertDescriptorToLocator(descriptor).locatorHash);
-    if (pkg)
-      return [pkg];
-
     const resolution = opts.project.storedResolutions.get(descriptor.descriptorHash);
-    if (!resolution)
-      throw new Error(`Expected the resolution to have been successful - resolution not found`);
+    if (resolution) {
+      const resolvedPkg = opts.project.originalPackages.get(resolution);
+      if (resolvedPkg) {
+        return [resolvedPkg];
+      }
+    }
 
-    pkg = opts.project.originalPackages.get(resolution);
-    if (!pkg)
-      throw new Error(`Expected the resolution to have been successful - package not found`);
+    const originalPkg = opts.project.originalPackages.get(structUtils.convertDescriptorToLocator(descriptor).locatorHash);
+    if (originalPkg)
+      return [originalPkg];
 
-    return [pkg];
+    throw new Error(`Resolution expected from the lockfile data`);
   }
 
-  async getSatisfying(descriptor: Descriptor, references: Array<string>, opts: ResolveOptions) {
-    return null;
+  async getSatisfying(descriptor: Descriptor, dependencies: Record<string, Package>, locators: Array<Locator>, opts: ResolveOptions) {
+    const [locator] = await this.getCandidates(descriptor, dependencies, opts);
+
+    return {
+      locators: locators.filter(candidate => candidate.locatorHash === locator.locatorHash),
+      sorted: false,
+    };
   }
 
   async resolve(locator: Locator, opts: ResolveOptions) {
     const pkg = opts.project.originalPackages.get(locator.locatorHash);
-
     if (!pkg)
       throw new Error(`The lockfile resolver isn't meant to resolve packages - they should already have been stored into a cache`);
 

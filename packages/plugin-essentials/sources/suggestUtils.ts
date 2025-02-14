@@ -1,23 +1,25 @@
 import {Cache, DescriptorHash, Descriptor, Ident, Locator, Manifest, Project, ThrowReport, Workspace, FetchOptions, ResolveOptions, Configuration} from '@yarnpkg/core';
-import {formatUtils, structUtils}                                                                                                                  from '@yarnpkg/core';
+import {formatUtils, structUtils, semverUtils}                                                                                                     from '@yarnpkg/core';
 import {PortablePath, ppath, xfs}                                                                                                                  from '@yarnpkg/fslib';
 import semver                                                                                                                                      from 'semver';
 
+const WORKSPACE_PROTOCOL = `workspace:`;
+
 export type Suggestion = {
-  descriptor: Descriptor,
-  name: string,
-  reason: string,
+  descriptor: Descriptor;
+  name: string;
+  reason: string;
 };
 
 export type NullableSuggestion = {
-  descriptor: Descriptor | null,
-  name: string,
-  reason: string,
+  descriptor: Descriptor | null;
+  name: string;
+  reason: string;
 };
 
 export type Results = {
-  suggestions: Array<NullableSuggestion>,
-  rejections: Array<Error>,
+  suggestions: Array<NullableSuggestion>;
+  rejections: Array<Error>;
 };
 
 export enum Target {
@@ -30,6 +32,12 @@ export enum Modifier {
   CARET = `^`,
   TILDE = `~`,
   EXACT = ``,
+}
+
+export enum WorkspaceModifier {
+  CARET = `^`,
+  TILDE = `~`,
+  EXACT = `*`,
 }
 
 export enum Strategy {
@@ -64,7 +72,7 @@ export enum Strategy {
   CACHE = `cache`,
 }
 
-export function getModifier(flags: {exact: boolean; caret: boolean; tilde: boolean}, project: Project): Modifier {
+export function getModifier(flags: {exact: boolean, caret: boolean, tilde: boolean}, project: Project): Modifier {
   if (flags.exact)
     return Modifier.EXACT;
   if (flags.caret)
@@ -91,10 +99,27 @@ export function applyModifier(descriptor: Descriptor, modifier: Modifier) {
   return structUtils.makeDescriptor(descriptor, structUtils.makeRange({protocol, source, params, selector}));
 }
 
+export function toWorkspaceModifier(modifier: Modifier): WorkspaceModifier {
+  switch (modifier) {
+    case Modifier.CARET:
+      return WorkspaceModifier.CARET;
+    case Modifier.TILDE:
+      return WorkspaceModifier.TILDE;
+    case Modifier.EXACT:
+      return WorkspaceModifier.EXACT;
+    default:
+      throw new Error(`Assertion failed: Unknown modifier: "${modifier}"`);
+  }
+}
+
+export function makeWorkspaceDescriptor(workspace: Workspace, modifier: Modifier) {
+  return structUtils.makeDescriptor(workspace.anchoredDescriptor, `${WORKSPACE_PROTOCOL}${toWorkspaceModifier(modifier)}`);
+}
+
 export async function findProjectDescriptors(ident: Ident, {project, target}: {project: Project, target: Target}) {
   const matches: Map<DescriptorHash, {
-    descriptor: Descriptor,
-    locators: Array<Locator>,
+    descriptor: Descriptor;
+    locators: Array<Locator>;
   }> = new Map();
 
   const getDescriptorEntry = (descriptor: Descriptor) => {
@@ -115,7 +140,7 @@ export async function findProjectDescriptors(ident: Ident, {project, target}: {p
       const peerDescriptor = workspace.manifest.peerDependencies.get(ident.identHash);
 
       if (peerDescriptor !== undefined) {
-        getDescriptorEntry(peerDescriptor).locators.push(workspace.locator);
+        getDescriptorEntry(peerDescriptor).locators.push(workspace.anchoredLocator);
       }
     } else {
       const regularDescriptor = workspace.manifest.dependencies.get(ident.identHash);
@@ -123,15 +148,15 @@ export async function findProjectDescriptors(ident: Ident, {project, target}: {p
 
       if (target === Target.DEVELOPMENT) {
         if (developmentDescriptor !== undefined) {
-          getDescriptorEntry(developmentDescriptor).locators.push(workspace.locator);
+          getDescriptorEntry(developmentDescriptor).locators.push(workspace.anchoredLocator);
         } else if (regularDescriptor !== undefined) {
-          getDescriptorEntry(regularDescriptor).locators.push(workspace.locator);
+          getDescriptorEntry(regularDescriptor).locators.push(workspace.anchoredLocator);
         }
       } else {
         if (regularDescriptor !== undefined) {
-          getDescriptorEntry(regularDescriptor).locators.push(workspace.locator);
+          getDescriptorEntry(regularDescriptor).locators.push(workspace.anchoredLocator);
         } else if (developmentDescriptor !== undefined) {
-          getDescriptorEntry(developmentDescriptor).locators.push(workspace.locator);
+          getDescriptorEntry(developmentDescriptor).locators.push(workspace.anchoredLocator);
         }
       }
     }
@@ -179,11 +204,17 @@ export async function extractDescriptorFromPath(path: PortablePath, {cwd, worksp
   });
 }
 
-export async function getSuggestedDescriptors(request: Descriptor, {project, workspace, cache, target, modifier, strategies, maxResults = Infinity}: {project: Project, workspace: Workspace, cache: Cache, target: Target, modifier: Modifier, strategies: Array<Strategy>, maxResults?: number}): Promise<Results> {
+export async function getSuggestedDescriptors(request: Descriptor, {project, workspace, cache, target, fixed, modifier, strategies, maxResults = Infinity}: {project: Project, workspace: Workspace, cache: Cache, target: Target, fixed: boolean, modifier: Modifier, strategies: Array<Strategy>, maxResults?: number}): Promise<Results> {
   if (!(maxResults >= 0))
     throw new Error(`Invalid maxResults (${maxResults})`);
 
-  if (request.range !== `unknown`) {
+  const [requestRange, requestTag] = request.range !== `unknown`
+    ? fixed || semverUtils.validRange(request.range) || !request.range.match(/^[a-z0-9._-]+$/i)
+      ? [request.range, `latest`]
+      : [`unknown`, request.range]
+    : [`unknown`, `latest`];
+
+  if (requestRange !== `unknown`) {
     return {
       suggestions: [{
         descriptor: request,
@@ -273,44 +304,40 @@ export async function getSuggestedDescriptors(request: Descriptor, {project, wor
           if (candidateWorkspace === null)
             return;
 
+          const workspaceDescriptor = makeWorkspaceDescriptor(candidateWorkspace, modifier);
+
           suggested.push({
-            descriptor: candidateWorkspace.anchoredDescriptor,
-            name: `Attach ${structUtils.prettyWorkspace(project.configuration, candidateWorkspace)}`,
-            reason: `(local workspace at ${candidateWorkspace.cwd})`,
+            descriptor: workspaceDescriptor,
+            name: `Attach ${structUtils.prettyDescriptor(project.configuration, workspaceDescriptor)}`,
+            reason: `(local workspace at ${formatUtils.pretty(project.configuration, candidateWorkspace.relativeCwd, formatUtils.Type.PATH)})`,
           });
         });
       } break;
 
       case Strategy.LATEST: {
+        const hasNetwork = project.configuration.get(`enableNetwork`);
+        const isOfflineMode = project.configuration.get(`enableOfflineMode`);
+
         await trySuggest(async () => {
-          if (request.range !== `unknown`) {
-            suggested.push({
-              descriptor: request,
-              name: `Use ${structUtils.prettyRange(project.configuration, request.range)}`,
-              reason: `(explicit range requested)`,
-            });
-          } else if (target === Target.PEER) {
+          if (target === Target.PEER) {
             suggested.push({
               descriptor: structUtils.makeDescriptor(request, `*`),
               name: `Use *`,
               reason: `(catch-all peer dependency pattern)`,
             });
-          } else if (!project.configuration.get(`enableNetwork`)) {
+          } else if (!hasNetwork && !isOfflineMode) {
             suggested.push({
               descriptor: null,
               name: `Resolve from latest`,
               reason: formatUtils.pretty(project.configuration, `(unavailable because enableNetwork is toggled off)`, `grey`),
             });
           } else {
-            let latest = await fetchDescriptorFrom(request, `latest`, {project, cache, workspace, preserveModifier: false});
-
+            const latest = await fetchDescriptorFrom(request, requestTag, {project, cache, workspace, modifier});
             if (latest) {
-              latest = applyModifier(latest, modifier);
-
               suggested.push({
                 descriptor: latest,
                 name: `Use ${structUtils.prettyDescriptor(project.configuration, latest)}`,
-                reason: `(resolved from latest)`,
+                reason: `(resolved from ${isOfflineMode ? `the cache` : `latest`})`,
               });
             }
           }
@@ -325,23 +352,34 @@ export async function getSuggestedDescriptors(request: Descriptor, {project, wor
   };
 }
 
-export async function fetchDescriptorFrom(ident: Ident, range: string, {project, cache, workspace, preserveModifier = true}: {project: Project, cache: Cache, workspace: Workspace, preserveModifier?: boolean | string}) {
-  const latestDescriptor = structUtils.makeDescriptor(ident, range);
+export type FetchDescriptorFromOptions = {
+  project: Project;
+  cache: Cache;
+  workspace: Workspace;
+} & ({
+  preserveModifier?: boolean | string;
+  modifier?: undefined;
+} | {
+  preserveModifier?: undefined;
+  modifier: Modifier;
+});
+
+export async function fetchDescriptorFrom(ident: Ident, range: string, {project, cache, workspace, preserveModifier = true, modifier}: FetchDescriptorFromOptions) {
+  const latestDescriptor = project.configuration.normalizeDependency(structUtils.makeDescriptor(ident, range));
 
   const report = new ThrowReport();
 
   const fetcher = project.configuration.makeFetcher();
   const resolver = project.configuration.makeResolver();
 
-  const fetchOptions: FetchOptions = {project, fetcher, cache, checksums: project.storedChecksums, report, skipIntegrityCheck: true};
+  const fetchOptions: FetchOptions = {project, fetcher, cache, checksums: project.storedChecksums, report, cacheOptions: {skipIntegrityCheck: true}};
   const resolveOptions: ResolveOptions = {...fetchOptions, resolver, fetchOptions};
 
   // The descriptor has to be bound for the resolvers that need a parent locator. (e.g. FileResolver)
   // If we didn't bind it, `yarn add ./folder` wouldn't work.
   const boundDescriptor = resolver.bindDescriptor(latestDescriptor, workspace.anchoredLocator, resolveOptions);
 
-  const candidateLocators = await resolver.getCandidates(boundDescriptor, new Map(), resolveOptions);
-
+  const candidateLocators = await resolver.getCandidates(boundDescriptor, {}, resolveOptions);
   if (candidateLocators.length === 0)
     return null;
 
@@ -352,13 +390,35 @@ export async function fetchDescriptorFrom(ident: Ident, range: string, {project,
   if (protocol === project.configuration.get(`defaultProtocol`))
     protocol = null;
 
-  if (semver.valid(selector) && preserveModifier !== false) {
-    const referenceRange = typeof preserveModifier === `string`
-      ? preserveModifier
-      : latestDescriptor.range;
+  if (semver.valid(selector)) {
+    const rawSelector = selector;
 
-    const modifier = extractRangeModifier(referenceRange, {project});
-    selector = modifier + selector;
+    if (typeof modifier !== `undefined`) {
+      selector = modifier + selector;
+    } else if (preserveModifier !== false) {
+      const referenceRange = typeof preserveModifier === `string`
+        ? preserveModifier
+        : latestDescriptor.range;
+
+      const modifier = extractRangeModifier(referenceRange, {project});
+      selector = modifier + selector;
+    }
+
+    const screeningDescriptor = structUtils.makeDescriptor(bestLocator, structUtils.makeRange({protocol, source, params, selector}));
+    const screeningLocators = await resolver.getCandidates(project.configuration.normalizeDependency(screeningDescriptor), {}, resolveOptions);
+
+    // If turning 1.0.0 into ^1.0.0 would cause it to resolve to something else
+    // (for example 1.1.0), then we don't add the modifier.
+    //
+    // This is to account for "weird" release strategies where things like
+    // prereleases are released as older versions than the latest available
+    // ones.
+    //
+    // Ex 1: https://github.com/parcel-bundler/parcel/issues/8010
+    // Ex 2: https://github.com/sveltejs/kit/discussions/4645
+    if (screeningLocators.length !== 1) {
+      selector = rawSelector;
+    }
   }
 
   return structUtils.makeDescriptor(bestLocator, structUtils.makeRange({protocol, source, params, selector}));

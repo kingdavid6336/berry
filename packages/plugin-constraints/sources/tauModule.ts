@@ -35,7 +35,7 @@ const tauModule = new pl.type.Module(`constraints`, {
     const [descriptorIdent, descriptorRange, workspaceCwd] = atom.args;
 
     if (!isAtom(descriptorIdent) || !isAtom(descriptorRange)) {
-      thread.throwError(pl.error.instantiation(atom.indicator));
+      thread.throw_error(pl.error.instantiation(atom.indicator));
       return;
     }
 
@@ -65,7 +65,7 @@ const tauModule = new pl.type.Module(`constraints`, {
     const [workspaceCwd, fieldName, fieldValue] = atom.args;
 
     if (!isAtom(workspaceCwd) || !isAtom(fieldName)) {
-      thread.throwError(pl.error.instantiation(atom.indicator));
+      thread.throw_error(pl.error.instantiation(atom.indicator));
       return;
     }
 
@@ -86,7 +86,10 @@ const tauModule = new pl.type.Module(`constraints`, {
 
     prependGoals(thread, point, [new pl.type.Term(`=`, [
       fieldValue,
-      new pl.type.Term(String(value)),
+      // TODO: Investigate whether we should JSON.stringify primitive values too.
+      // For now we don't because it would be a breaking change.
+      // https://github.com/yarnpkg/berry/issues/3584
+      new pl.type.Term(typeof value === `object` ? JSON.stringify(value) : value),
     ])]);
   },
 
@@ -109,7 +112,7 @@ const tauModule = new pl.type.Module(`constraints`, {
     const [workspaceCwd, fieldName, checkCode, checkArgv] = atom.args;
 
     if (!isAtom(workspaceCwd) || !isAtom(fieldName) || !isAtom(checkCode) || !isInstantiatedList(checkArgv)) {
-      thread.throwError(pl.error.instantiation(atom.indicator));
+      thread.throw_error(pl.error.instantiation(atom.indicator));
       return;
     }
 

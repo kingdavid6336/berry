@@ -2,11 +2,12 @@ import {FakeFS, Filename, NodeFS, PortablePath, ppath}    from '@yarnpkg/fslib';
 import {Resolution, parseResolution, stringifyResolution} from '@yarnpkg/parsers';
 import semver                                             from 'semver';
 
+import {WorkspaceResolver}                                from './WorkspaceResolver';
 import * as miscUtils                                     from './miscUtils';
 import * as semverUtils                                   from './semverUtils';
 import * as structUtils                                   from './structUtils';
-import {IdentHash}                                        from './types';
 import {Ident, Descriptor}                                from './types';
+import {IdentHash}                                        from './types';
 
 export type AllDependencies = 'dependencies' | 'devDependencies' | 'peerDependencies';
 export type HardDependencies = 'dependencies' | 'devDependencies';
@@ -29,6 +30,7 @@ export interface PublishConfig {
   access?: string;
   main?: PortablePath;
   module?: PortablePath;
+  type?: string;
   browser?: PortablePath | Map<PortablePath, boolean | PortablePath>;
   bin?: Map<string, PortablePath>;
   registry?: string;
@@ -37,6 +39,7 @@ export interface PublishConfig {
 
 export interface InstallConfig {
   hoistingLimits?: string;
+  selfReferences?: boolean;
 }
 
 export class Manifest {
@@ -46,9 +49,11 @@ export class Manifest {
   public version: string | null = null;
   public os: Array<string> | null = null;
   public cpu: Array<string> | null = null;
+  public libc: Array<string> | null = null;
 
   public type: string | null = null;
 
+  public packageManager: string | null = null;
   public ["private"]: boolean = false;
   public license: string | null = null;
 
@@ -91,12 +96,16 @@ export class Manifest {
   static readonly hardDependencies: Array<HardDependencies> = [`dependencies`, `devDependencies`];
 
   static async tryFind(path: PortablePath, {baseFs = new NodeFS()}: {baseFs?: FakeFS<PortablePath>} = {}) {
-    const manifestPath = ppath.join(path, `package.json` as Filename);
+    const manifestPath = ppath.join(path, `package.json`);
 
-    if (!await baseFs.existsPromise(manifestPath))
-      return null;
+    try {
+      return await Manifest.fromFile(manifestPath, {baseFs});
+    } catch (err) {
+      if (err.code === `ENOENT`)
+        return null;
 
-    return await Manifest.fromFile(manifestPath, {baseFs});
+      throw err;
+    }
   }
 
   static async find(path: PortablePath, {baseFs}: {baseFs?: FakeFS<PortablePath>} = {}) {
@@ -120,33 +129,6 @@ export class Manifest {
     manifest.loadFromText(text);
 
     return manifest;
-  }
-
-  static isManifestFieldCompatible(rules: Array<string> | null, actual: string) {
-    if (rules === null)
-      return true;
-
-    let isNotOnAllowlist = true;
-    let isOnDenylist = false;
-
-    for (const rule of rules) {
-      if (rule[0] === `!`) {
-        isOnDenylist = true;
-
-        if (actual === rule.slice(1)) {
-          return false;
-        }
-      } else {
-        isNotOnAllowlist = false;
-
-        if (rule === actual) {
-          return true;
-        }
-      }
-    }
-
-    // Denylists with allowlisted items should be treated as allowlists for `os` and `cpu` in `package.json`
-    return isOnDenylist && isNotOnAllowlist;
   }
 
   loadFromText(text: string) {
@@ -228,10 +210,30 @@ export class Manifest {
       this.cpu = null;
     }
 
+    if (Array.isArray(data.libc)) {
+      const libc: Array<string> = [];
+      this.libc = libc;
+
+      for (const item of data.libc) {
+        if (typeof item !== `string`) {
+          errors.push(new Error(`Parsing failed for the 'libc' field`));
+        } else {
+          libc.push(item);
+        }
+      }
+    } else {
+      this.libc = null;
+    }
+
     if (typeof data.type === `string`)
       this.type = data.type;
     else
       this.type = null;
+
+    if (typeof data.packageManager === `string`)
+      this.packageManager = data.packageManager;
+    else
+      this.packageManager = null;
 
     if (typeof data.private === `boolean`)
       this.private = data.private;
@@ -266,7 +268,7 @@ export class Manifest {
         for (const [key, value] of Object.entries(data.browser)) {
           this.browser.set(
             normalizeSlashes(key),
-            typeof value === `string` ? normalizeSlashes(value) : (value as boolean)
+            typeof value === `string` ? normalizeSlashes(value) : (value as boolean),
           );
         }
       }
@@ -276,19 +278,36 @@ export class Manifest {
 
     this.bin = new Map();
     if (typeof data.bin === `string`) {
-      if (this.name !== null) {
+      if (data.bin.trim() === ``) {
+        errors.push(new Error(`Invalid bin field`));
+      } else if (this.name !== null) {
         this.bin.set(this.name.name, normalizeSlashes(data.bin));
       } else {
         errors.push(new Error(`String bin field, but no attached package name`));
       }
     } else if (typeof data.bin === `object` && data.bin !== null) {
       for (const [key, value] of Object.entries(data.bin)) {
-        if (typeof value !== `string`) {
+        if (typeof value !== `string` || value.trim() === ``) {
           errors.push(new Error(`Invalid bin definition for '${key}'`));
           continue;
         }
 
-        this.bin.set(key, normalizeSlashes(value));
+        // Some registries incorrectly normalize the `bin` field of
+        // scoped packages to be invalid filenames.
+        // E.g. from
+        // {
+        //   "name": "@yarnpkg/doctor",
+        //   "bin": "index.js"
+        // }
+        // to
+        // {
+        //   "name": "@yarnpkg/doctor",
+        //   "bin": {
+        //     "@yarnpkg/doctor": "index.js"
+        //   }
+        // }
+        const binaryIdent = structUtils.parseIdent(key);
+        this.bin.set(binaryIdent.name, normalizeSlashes(value));
       }
     }
 
@@ -357,7 +376,7 @@ export class Manifest {
           continue;
         }
 
-        if (typeof range !== `string` || !semverUtils.validRange(range)) {
+        if (typeof range !== `string` || (!range.startsWith(WorkspaceResolver.protocol) && !semverUtils.validRange(range))) {
           errors.push(new Error(`Invalid dependency range for '${name}'`));
           range = `*`;
         }
@@ -367,7 +386,7 @@ export class Manifest {
       }
     }
 
-    if (typeof data.workspaces === `object` && data.workspaces.nohoist)
+    if (typeof data.workspaces === `object` && data.workspaces !== null && data.workspaces.nohoist)
       errors.push(new Error(`'nohoist' is deprecated, please use 'installConfig.hoistingLimits' instead`));
 
     const workspaces = Array.isArray(data.workspaces)
@@ -494,7 +513,7 @@ export class Manifest {
           for (const [key, value] of Object.entries(data.publishConfig.browser)) {
             this.publishConfig.browser.set(
               normalizeSlashes(key),
-              typeof value === `string` ? normalizeSlashes(value) : (value as boolean)
+              typeof value === `string` ? normalizeSlashes(value) : (value as boolean),
             );
           }
         }
@@ -547,6 +566,12 @@ export class Manifest {
             this.installConfig.hoistingLimits = data.installConfig.hoistingLimits;
           } else {
             errors.push(new Error(`Invalid hoisting limits definition`));
+          }
+        } else if (key == `selfReferences`) {
+          if (typeof data.installConfig.selfReferences == `boolean`) {
+            this.installConfig.selfReferences = data.installConfig.selfReferences;
+          } else {
+            errors.push(new Error(`Invalid selfReferences definition, must be a boolean value`));
           }
         } else {
           errors.push(new Error(`Unrecognized installConfig key: ${key}`));
@@ -651,12 +676,17 @@ export class Manifest {
     return false;
   }
 
-  isCompatibleWithOS(os: string): boolean {
-    return Manifest.isManifestFieldCompatible(this.os, os);
-  }
+  getConditions() {
+    const fields: Array<string> = [];
 
-  isCompatibleWithCPU(cpu: string): boolean {
-    return Manifest.isManifestFieldCompatible(this.cpu, cpu);
+    if (this.os && this.os.length > 0)
+      fields.push(toConditionLine(`os`, this.os));
+    if (this.cpu && this.cpu.length > 0)
+      fields.push(toConditionLine(`cpu`, this.cpu));
+    if (this.libc && this.libc.length > 0)
+      fields.push(toConditionLine(`libc`, this.libc));
+
+    return fields.length > 0 ? fields.join(` & `) : null;
   }
 
   ensureDependencyMeta(descriptor: Descriptor) {
@@ -692,10 +722,10 @@ export class Manifest {
 
   setRawField(name: string, value: any, {after = []}: {after?: Array<string>} = {}) {
     const afterSet = new Set(after.filter(key => {
-      return Object.prototype.hasOwnProperty.call(this.raw, key);
+      return Object.hasOwn(this.raw, key);
     }));
 
-    if (afterSet.size === 0 || Object.prototype.hasOwnProperty.call(this.raw, name)) {
+    if (afterSet.size === 0 || Object.hasOwn(this.raw, name)) {
       this.raw[name] = value;
     } else {
       const oldRaw = this.raw;
@@ -748,6 +778,11 @@ export class Manifest {
     else
       delete data.type;
 
+    if (this.packageManager !== null)
+      data.packageManager = this.packageManager;
+    else
+      delete data.packageManager;
+
     if (this.private)
       data.private = true;
     else
@@ -786,7 +821,6 @@ export class Manifest {
     } else {
       delete data.browser;
     }
-
 
     if (this.bin.size === 1 && this.name !== null && this.bin.has(this.name.name)) {
       data.bin = this.bin.get(this.name.name)!;
@@ -914,6 +948,21 @@ export class Manifest {
     else
       delete data.preferUnplugged;
 
+    if (this.scripts !== null && this.scripts.size > 0) {
+      data.scripts ??= {};
+
+      for (const existingScriptName of Object.keys(data.scripts))
+        if (!this.scripts.has(existingScriptName))
+          delete data.scripts[existingScriptName];
+
+      for (const [name, content] of this.scripts.entries()) {
+        // Set one at a time in order to preserve implicitly-preserved ordering of existing scripts.
+        data.scripts[name] = content;
+      }
+    } else {
+      delete data.scripts;
+    }
+
     return data;
   }
 }
@@ -948,4 +997,23 @@ function tryParseOptionalBoolean(value: unknown, {yamlCompatibilityMode}: {yamlC
     return value;
 
   return null;
+}
+
+function toConditionToken(name: string, raw: string) {
+  const index = raw.search(/[^!]/);
+  if (index === -1)
+    return `invalid`;
+
+  const prefix = index % 2 === 0 ? `` : `!`;
+  const value = raw.slice(index);
+
+  return `${prefix}${name}=${value}`;
+}
+
+function toConditionLine(name: string, rawTokens: Array<string>) {
+  if (rawTokens.length === 1) {
+    return toConditionToken(name, rawTokens[0]);
+  } else {
+    return `(${rawTokens.map(raw => toConditionToken(name, raw)).join(` | `)})`;
+  }
 }

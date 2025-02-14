@@ -1,12 +1,11 @@
 import {xfs} from '@yarnpkg/fslib';
 
 const {
-  fs: {createTemporaryFolder, writeJson},
   tests: {getPackageDirectoryPath},
 } = require(`pkg-tests-core`);
 
 describe(`Protocols`, () => {
-  describe(`portal:`, () => {
+  describe(`link:`, () => {
     test(
       `it should link a remote location into the current dependency tree`,
       makeTemporaryEnv({
@@ -46,13 +45,13 @@ describe(`Protocols`, () => {
       makeTemporaryEnv(
         {},
         async ({path, run, source}) => {
-          const tmp = await createTemporaryFolder();
+          const tmp = await xfs.mktempPromise();
 
-          await writeJson(`${tmp}/data.json`, {
+          await xfs.writeJsonPromise(`${tmp}/data.json`, {
             data: 42,
           });
 
-          await writeJson(`${path}/package.json`, {
+          await xfs.writeJsonPromise(`${path}/package.json`, {
             dependencies: {
               [`foo`]: `link:${tmp}`,
             },

@@ -26,9 +26,22 @@ export default class CreateCommand extends BaseCommand {
     if (this.quiet)
       flags.push(`--quiet`);
 
-    const ident = structUtils.parseIdent(this.command);
-    const modified = structUtils.makeIdent(ident.scope, `create-${ident.name}`);
+    // @foo -> @foo/create
+    const command = this.command.replace(/^(@[^@/]+)(@|$)/, `$1/create$2`);
+    const descriptor = structUtils.parseDescriptor(command);
 
-    return this.cli.run([`dlx`, ...flags, structUtils.stringifyIdent(modified), ...this.args]);
+    // @foo/app -> @foo/create-app
+    // foo -> create-foo
+    const modifiedIdent = !descriptor.name.match(/^create(-|$)/)
+      ? descriptor.scope
+        ? structUtils.makeIdent(descriptor.scope, `create-${descriptor.name}`)
+        : structUtils.makeIdent(null, `create-${descriptor.name}`)
+      : descriptor;
+
+    let finalDescriptorString = structUtils.stringifyIdent(modifiedIdent);
+    if (descriptor.range !== `unknown`)
+      finalDescriptorString += `@${descriptor.range}`;
+
+    return this.cli.run([`dlx`, ...flags, finalDescriptorString, ...this.args]);
   }
 }

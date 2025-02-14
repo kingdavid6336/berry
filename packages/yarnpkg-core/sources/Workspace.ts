@@ -1,13 +1,13 @@
 import {PortablePath, npath, ppath, xfs, Filename} from '@yarnpkg/fslib';
-import globby                                      from 'globby';
-import semver                                      from 'semver';
+import fastGlob                                    from 'fast-glob';
 
-import {Manifest}                                  from './Manifest';
+import {HardDependencies, Manifest}                from './Manifest';
 import {Project}                                   from './Project';
 import {WorkspaceResolver}                         from './WorkspaceResolver';
+import * as formatUtils                            from './formatUtils';
 import * as hashUtils                              from './hashUtils';
+import * as semverUtils                            from './semverUtils';
 import * as structUtils                            from './structUtils';
-import {IdentHash}                                 from './types';
 import {Descriptor, Locator}                       from './types';
 
 export class Workspace {
@@ -23,16 +23,10 @@ export class Workspace {
   // @ts-expect-error: This variable is set during the setup process
   public readonly anchoredLocator: Locator;
 
-  // @ts-expect-error: This variable is set during the setup process
-  public readonly locator: Locator;
-
-  // @ts-expect-error: This variable is set during the setup process
-  public readonly manifest: Manifest;
-
   public readonly workspacesCwds: Set<PortablePath> = new Set();
 
-  // Generated at resolution; basically dependencies + devDependencies + child workspaces
-  public dependencies: Map<IdentHash, Descriptor> = new Map();
+  // @ts-expect-error: This variable is set during the setup process
+  public manifest: Manifest;
 
   constructor(workspaceCwd: PortablePath, {project}: {project: Project}) {
     this.project = project;
@@ -40,48 +34,53 @@ export class Workspace {
   }
 
   async setup() {
-    // @ts-expect-error: It's ok to initialize it now
-    this.manifest = xfs.existsSync(ppath.join(this.cwd, Manifest.fileName))
-      ? await Manifest.find(this.cwd)
-      : new Manifest();
+    this.manifest = await Manifest.tryFind(this.cwd) ?? new Manifest();
 
     // We use ppath.relative to guarantee that the default hash will be consistent even if the project is installed on different OS / path
     // @ts-expect-error: It's ok to initialize it now, even if it's readonly (setup is called right after construction)
     this.relativeCwd = ppath.relative(this.project.cwd, this.cwd) || PortablePath.dot;
 
-    const ident = this.manifest.name ? this.manifest.name : structUtils.makeIdent(null, `${this.computeCandidateName()}-${hashUtils.makeHash<string>(this.relativeCwd).substr(0, 6)}`);
-    const reference = this.manifest.version ? this.manifest.version : `0.0.0`;
+    const ident = this.manifest.name ? this.manifest.name : structUtils.makeIdent(null, `${this.computeCandidateName()}-${hashUtils.makeHash<string>(this.relativeCwd).substring(0, 6)}`);
 
     // @ts-expect-error: It's ok to initialize it now, even if it's readonly (setup is called right after construction)
-    this.locator = structUtils.makeLocator(ident, reference);
+    this.anchoredDescriptor = structUtils.makeDescriptor(ident, `${WorkspaceResolver.protocol}${this.relativeCwd}`);
 
     // @ts-expect-error: It's ok to initialize it now, even if it's readonly (setup is called right after construction)
-    this.anchoredDescriptor = structUtils.makeDescriptor(this.locator, `${WorkspaceResolver.protocol}${this.relativeCwd}`);
-
-    // @ts-expect-error: It's ok to initialize it now, even if it's readonly (setup is called right after construction)
-    this.anchoredLocator = structUtils.makeLocator(this.locator, `${WorkspaceResolver.protocol}${this.relativeCwd}`);
+    this.anchoredLocator = structUtils.makeLocator(ident, `${WorkspaceResolver.protocol}${this.relativeCwd}`);
 
     const patterns = this.manifest.workspaceDefinitions.map(({pattern}) => pattern);
 
-    const relativeCwds = await globby(patterns, {
-      absolute: true,
+    if (patterns.length === 0)
+      return;
+
+    const relativeCwds = await fastGlob(patterns, {
       cwd: npath.fromPortablePath(this.cwd),
-      expandDirectories: false,
       onlyDirectories: true,
-      onlyFiles: false,
       ignore: [`**/node_modules`, `**/.git`, `**/.yarn`],
     });
 
-    // It seems that the return value of globby isn't in any guaranteed order - not even the directory listing order
+    // fast-glob returns results in arbitrary order
     relativeCwds.sort();
 
-    for (const relativeCwd of relativeCwds) {
+    await relativeCwds.reduce(async (previousTask, relativeCwd) => {
       const candidateCwd = ppath.resolve(this.cwd, npath.toPortablePath(relativeCwd));
 
-      if (xfs.existsSync(ppath.join(candidateCwd, `package.json` as Filename))) {
+      const exists = await xfs.existsPromise(ppath.join(candidateCwd, `package.json`));
+
+      // Ensure candidateCwds are added in order
+      await previousTask;
+      if (exists) {
         this.workspacesCwds.add(candidateCwd);
       }
-    }
+    }, Promise.resolve());
+  }
+
+  get anchoredPackage() {
+    const pkg = this.project.storedPackages.get(this.anchoredLocator.locatorHash);
+    if (!pkg)
+      throw new Error(`Assertion failed: Expected workspace ${structUtils.prettyWorkspace(this.project.configuration, this)} (${formatUtils.pretty(this.project.configuration, ppath.join(this.cwd, Filename.manifest), formatUtils.Type.PATH)}) to have been resolved. Run "yarn install" to update the lockfile`);
+
+    return pkg;
   }
 
   accepts(range: string) {
@@ -98,20 +97,21 @@ export class Workspace {
     if (protocol === WorkspaceResolver.protocol && ppath.normalize(pathname as PortablePath) === this.relativeCwd)
       return true;
 
-    if (protocol === WorkspaceResolver.protocol && pathname === `*`)
+    if (protocol === WorkspaceResolver.protocol && (pathname === `*` || pathname === `^` || pathname === `~`))
       return true;
 
-    if (!semver.validRange(pathname))
+    const semverRange = semverUtils.validRange(pathname);
+    if (!semverRange)
       return false;
 
     if (protocol === WorkspaceResolver.protocol)
-      return semver.satisfies(this.manifest.version !== null ? this.manifest.version : `0.0.0`, pathname);
+      return semverRange.test(this.manifest.version ?? `0.0.0`);
 
     if (!this.project.configuration.get(`enableTransparentWorkspaces`))
       return false;
 
     if (this.manifest.version !== null)
-      return semver.satisfies(this.manifest.version, pathname);
+      return semverRange.test(this.manifest.version);
 
     return false;
   }
@@ -124,6 +124,96 @@ export class Workspace {
     }
   }
 
+  /**
+   * Find workspaces marked as dependencies/devDependencies of the current workspace recursively.
+   *
+   * @param rootWorkspace root workspace
+   * @param project project
+   *
+   * @returns all the workspaces marked as dependencies
+   */
+  getRecursiveWorkspaceDependencies({dependencies = Manifest.hardDependencies}: {dependencies?: Array<HardDependencies>} = {}) {
+    const workspaceList = new Set<Workspace>();
+
+    const visitWorkspace = (workspace: Workspace) => {
+      for (const dependencyType of dependencies) {
+        // Quick note: it means that if we have, say, a workspace in
+        // dev dependencies but not in dependencies, this workspace will be
+        // traversed (even if dependencies traditionally override dev
+        // dependencies). It's not clear which behaviour is better, but
+        // at least it's consistent.
+        for (const descriptor of workspace.manifest[dependencyType].values()) {
+          const foundWorkspace = this.project.tryWorkspaceByDescriptor(descriptor);
+          if (foundWorkspace === null || workspaceList.has(foundWorkspace))
+            continue;
+
+          workspaceList.add(foundWorkspace);
+          visitWorkspace(foundWorkspace);
+        }
+      }
+    };
+
+    visitWorkspace(this);
+    return workspaceList;
+  }
+
+  /**
+   * Find workspaces which include the current workspace as a dependency/devDependency recursively.
+   *
+   * @param rootWorkspace root workspace
+   * @param project project
+   *
+   * @returns all the workspaces marked as dependents
+   */
+  getRecursiveWorkspaceDependents({dependencies = Manifest.hardDependencies}: {dependencies?: Array<HardDependencies>} = {}) {
+    const workspaceList = new Set<Workspace>();
+
+    const visitWorkspace = (workspace: Workspace) => {
+      for (const projectWorkspace of this.project.workspaces) {
+        const isDependent = dependencies.some(dependencyType => {
+          return [...projectWorkspace.manifest[dependencyType].values()].some(descriptor => {
+            const foundWorkspace = this.project.tryWorkspaceByDescriptor(descriptor);
+            return foundWorkspace !== null && structUtils.areLocatorsEqual(foundWorkspace.anchoredLocator, workspace.anchoredLocator);
+          });
+        });
+
+        if (isDependent && !workspaceList.has(projectWorkspace)) {
+          workspaceList.add(projectWorkspace);
+          visitWorkspace(projectWorkspace);
+        }
+      }
+    };
+
+    visitWorkspace(this);
+    return workspaceList;
+  }
+
+  /**
+   * Retrieves all the child workspaces of a given root workspace recursively
+   *
+   * @param rootWorkspace root workspace
+   * @param project project
+   *
+   * @returns all the child workspaces
+   */
+  getRecursiveWorkspaceChildren() {
+    const workspaceSet = new Set<Workspace>([this]);
+
+    for (const workspace of workspaceSet) {
+      for (const childWorkspaceCwd of workspace.workspacesCwds) {
+        const childWorkspace = this.project.workspacesByCwd.get(childWorkspaceCwd);
+
+        if (childWorkspace) {
+          workspaceSet.add(childWorkspace);
+        }
+      }
+    }
+
+    workspaceSet.delete(this);
+
+    return Array.from(workspaceSet);
+  }
+
   async persistManifest() {
     const data = {};
     this.manifest.exportTo(data);
@@ -134,5 +224,7 @@ export class Workspace {
     await xfs.changeFilePromise(path, content, {
       automaticNewlines: true,
     });
+
+    this.manifest.raw = data;
   }
 }

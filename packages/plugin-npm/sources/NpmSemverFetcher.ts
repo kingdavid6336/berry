@@ -1,8 +1,7 @@
 import {Configuration, Fetcher, FetchOptions, MinimalFetchOptions} from '@yarnpkg/core';
-import {structUtils, tgzUtils}                                     from '@yarnpkg/core';
+import {structUtils, tgzUtils, semverUtils}                        from '@yarnpkg/core';
 import {Locator, MessageName, ReportError}                         from '@yarnpkg/core';
 import semver                                                      from 'semver';
-import {URL}                                                       from 'url';
 
 import {PROTOCOL}                                                  from './constants';
 import * as npmConfigUtils                                         from './npmConfigUtils';
@@ -34,7 +33,7 @@ export class NpmSemverFetcher implements Fetcher {
       onHit: () => opts.report.reportCacheHit(locator),
       onMiss: () => opts.report.reportCacheMiss(locator, `${structUtils.prettyLocator(opts.project.configuration, locator)} can't be found in the cache and will be fetched from the remote registry`),
       loader: () => this.fetchFromNetwork(locator, opts),
-      skipIntegrityCheck: opts.skipIntegrityCheck,
+      ...opts.cacheOptions,
     });
 
     return {
@@ -49,6 +48,7 @@ export class NpmSemverFetcher implements Fetcher {
     let sourceBuffer;
     try {
       sourceBuffer = await npmHttpUtils.get(NpmSemverFetcher.getLocatorUrl(locator), {
+        customErrorMessage: npmHttpUtils.customPackageError,
         configuration: opts.project.configuration,
         ident: locator,
       });
@@ -57,13 +57,14 @@ export class NpmSemverFetcher implements Fetcher {
       // OK: https://registry.yarnpkg.com/@emotion%2fbabel-preset-css-prop/-/babel-preset-css-prop-10.0.7.tgz
       // KO: https://registry.yarnpkg.com/@xtuc%2fieee754/-/ieee754-1.2.0.tgz
       sourceBuffer = await npmHttpUtils.get(NpmSemverFetcher.getLocatorUrl(locator).replace(/%2f/g, `/`), {
+        customErrorMessage: npmHttpUtils.customPackageError,
         configuration: opts.project.configuration,
         ident: locator,
       });
     }
 
     return await tgzUtils.convertToZip(sourceBuffer, {
-      compressionLevel: opts.project.configuration.get(`compressionLevel`),
+      configuration: opts.project.configuration,
       prefixPath: structUtils.getIdentVendorPath(locator),
       stripComponents: 1,
     });
@@ -89,7 +90,7 @@ export class NpmSemverFetcher implements Fetcher {
   }
 
   static getLocatorUrl(locator: Locator) {
-    const version = semver.clean(locator.reference.slice(PROTOCOL.length));
+    const version = semverUtils.clean(locator.reference.slice(PROTOCOL.length));
     if (version === null)
       throw new ReportError(MessageName.RESOLVER_NOT_FOUND, `The npm semver resolver got selected, but the version isn't semver`);
 
