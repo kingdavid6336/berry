@@ -10,8 +10,8 @@ const ALGOLIA_APP_ID = `OFCNCOG2CU`;
 
 interface AlgoliaObj {
   types?: {
-    ts?: string
-  }
+    ts?: string;
+  };
 }
 
 export const hasDefinitelyTyped = async (
@@ -26,7 +26,7 @@ export const hasDefinitelyTyped = async (
     const packageInfo = await index.getObject<AlgoliaObj>(stringifiedIdent, {attributesToRetrieve: [`types`]});
 
     return packageInfo.types?.ts === `definitely-typed`;
-  } catch (_e) {
+  } catch {
     return false;
   }
 };

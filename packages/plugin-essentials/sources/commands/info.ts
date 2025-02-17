@@ -227,9 +227,9 @@ export default class InfoCommand extends BaseCommand {
     const infoTree: treeUtils.TreeNode = {children: infoTreeChildren};
 
     const fetcher = configuration.makeFetcher();
-    const fetcherOptions: FetchOptions = {project, fetcher, cache, checksums: project.storedChecksums, report: new ThrowReport(), skipIntegrityCheck: true};
+    const fetcherOptions: FetchOptions = {project, fetcher, cache, checksums: project.storedChecksums, report: new ThrowReport(), cacheOptions: {skipIntegrityCheck: true}};
 
-    const builtinInfoBuilders: Array<Exclude<Hooks['fetchPackageInfo'], undefined>> = [
+    const builtinInfoBuilders: Array<Exclude<Hooks[`fetchPackageInfo`], undefined>> = [
       // Manifest fields
       async (pkg, extra, registerData) => {
         if (!extra.has(`manifest`))
@@ -261,7 +261,7 @@ export default class InfoCommand extends BaseCommand {
         let stat;
         if (cachePath !== null) {
           try {
-            stat = xfs.statSync(cachePath);
+            stat = await xfs.statPromise(cachePath);
           } catch {}
         }
 

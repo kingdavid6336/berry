@@ -11,6 +11,9 @@ const queries = {
   [`custom predicate`]: `custom_predicate(DependencyType).`,
   [`filter w/ workspace_field_test/3`]: `workspace(WorkspaceCwd), workspace_field_test(WorkspaceCwd, 'name', '$$ === "workspace-a"').`,
   [`filter w/ workspace_field_test/4`]: `workspace(WorkspaceCwd), workspace_field_test(WorkspaceCwd, 'name', '$$ === $0', ['workspace-b']).`,
+  [`workspace_field w/ string FieldValue`]: `workspace_field('.', 'name', FieldValue).`,
+  [`workspace_field w/ object FieldValue`]: `workspace_field('.', 'repository', FieldValue).`,
+  [`workspace_field w/ array FieldValue`]: `workspace_field('.', 'files', FieldValue).`,
 };
 
 const constraintsFile = `
@@ -23,11 +26,7 @@ describe(`Commands`, () => {
   describe(`constraints query`, () => {
     test(
       `test without trailing .`,
-      makeTemporaryEnv({}, {
-        plugins: [
-          require.resolve(`@yarnpkg/monorepo/scripts/plugin-constraints.js`),
-        ],
-      }, async({path, run, source}) => {
+      makeTemporaryEnv({}, async({path, run, source}) => {
         await environments[`one regular dependency`](path);
 
         let code;
@@ -46,11 +45,7 @@ describe(`Commands`, () => {
 
     test(
       `test with a syntax error`,
-      makeTemporaryEnv({}, {
-        plugins: [
-          require.resolve(`@yarnpkg/monorepo/scripts/plugin-constraints.js`),
-        ],
-      }, async({path, run, source}) => {
+      makeTemporaryEnv({}, async({path, run, source}) => {
         await environments[`one regular dependency`](path);
 
         let code;
@@ -69,11 +64,7 @@ describe(`Commands`, () => {
 
     test(
       `test with an unknown predicate`,
-      makeTemporaryEnv({}, {
-        plugins: [
-          require.resolve(`@yarnpkg/monorepo/scripts/plugin-constraints.js`),
-        ],
-      }, async({path, run, source}) => {
+      makeTemporaryEnv({}, async({path, run, source}) => {
         await environments[`one regular dependency`](path);
 
         let code;
@@ -92,11 +83,7 @@ describe(`Commands`, () => {
 
     test(
       `test with an empty predicate`,
-      makeTemporaryEnv({}, {
-        plugins: [
-          require.resolve(`@yarnpkg/monorepo/scripts/plugin-constraints.js`),
-        ],
-      }, async({path, run, source}) => {
+      makeTemporaryEnv({}, async({path, run, source}) => {
         await environments[`one regular dependency`](path);
 
         let code;
@@ -117,11 +104,7 @@ describe(`Commands`, () => {
       for (const [queryDescription, query] of Object.entries(queries)) {
         test(
           `test (${environmentDescription} / ${queryDescription})`,
-          makeTemporaryEnv({}, {
-            plugins: [
-              require.resolve(`@yarnpkg/monorepo/scripts/plugin-constraints.js`),
-            ],
-          }, async ({path, run, source}) => {
+          makeTemporaryEnv({}, async ({path, run, source}) => {
             await environment(path);
             await writeFile(`${path}/constraints.pro`, constraintsFile);
 

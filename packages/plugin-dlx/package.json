@@ -1,21 +1,24 @@
 {
   "name": "@yarnpkg/plugin-dlx",
-  "version": "2.1.4",
+  "version": "4.0.0",
   "license": "BSD-2-Clause",
   "main": "./sources/index.ts",
+  "exports": {
+    ".": "./sources/index.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@yarnpkg/fslib": "workspace:^2.4.0",
-    "@yarnpkg/json-proxy": "workspace:^2.1.0",
-    "clipanion": "^3.0.0-rc.10",
-    "tslib": "^1.13.0"
+    "@yarnpkg/fslib": "workspace:^",
+    "clipanion": "^4.0.0-rc.2",
+    "tslib": "^2.4.0"
   },
   "peerDependencies": {
-    "@yarnpkg/cli": "^2.4.0",
-    "@yarnpkg/core": "^2.4.0"
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^"
   },
   "devDependencies": {
-    "@yarnpkg/cli": "workspace:^2.4.0",
-    "@yarnpkg/core": "workspace:^2.4.0"
+    "@yarnpkg/cli": "workspace:^",
+    "@yarnpkg/core": "workspace:^"
   },
   "repository": {
     "type": "git",
@@ -28,12 +31,16 @@
   },
   "publishConfig": {
     "main": "./lib/index.js",
-    "typings": "./lib/index.d.ts"
+    "exports": {
+      ".": "./lib/index.js",
+      "./package.json": "./package.json"
+    }
   },
   "files": [
     "/lib/**/*"
   ],
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "stableVersion": "4.0.0"
 }

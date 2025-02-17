@@ -1,13 +1,19 @@
 import {npath}                                                              from '@yarnpkg/fslib';
 import chalk                                                                from 'chalk';
+import CI                                                                   from 'ci-info';
+import {ColorFormat, formatMarkdownish}                                     from 'clipanion';
+import micromatch                                                           from 'micromatch';
 import stripAnsi                                                            from 'strip-ansi';
+import {inspect}                                                            from 'util';
 
-import {Configuration}                                                      from './Configuration';
+import {Configuration, ConfigurationValueMap}                               from './Configuration';
 import {MessageName, stringifyMessageName}                                  from './MessageName';
 import {Report}                                                             from './Report';
 import * as miscUtils                                                       from './miscUtils';
 import * as structUtils                                                     from './structUtils';
 import {Descriptor, Locator, Ident, PackageExtension, PackageExtensionType} from './types';
+
+export {stripAnsi};
 
 // We have to workaround a TS bug:
 // https://github.com/microsoft/TypeScript/issues/35329
@@ -17,6 +23,8 @@ import {Descriptor, Locator, Ident, PackageExtension, PackageExtensionType} from
 //
 export const Type = {
   NO_HINT: `NO_HINT`,
+
+  ID: `ID`,
 
   NULL: `NULL`,
 
@@ -31,9 +39,11 @@ export const Type = {
   ADDED: `ADDED`,
   REMOVED: `REMOVED`,
   CODE: `CODE`,
+  INSPECT: `INSPECT`,
 
   DURATION: `DURATION`,
   SIZE: `SIZE`,
+  SIZE_DIFF: `SIZE_DIFF`,
 
   IDENT: `IDENT`,
   DESCRIPTOR: `DESCRIPTOR`,
@@ -41,6 +51,10 @@ export const Type = {
   RESOLUTION: `RESOLUTION`,
   DEPENDENT: `DEPENDENT`,
   PACKAGE_EXTENSION: `PACKAGE_EXTENSION`,
+  SETTING: `SETTING`,
+
+  MARKDOWN: `MARKDOWN`,
+  MARKDOWN_INLINE: `MARKDOWN_INLINE`,
 } as const;
 
 export type Type = keyof typeof Type;
@@ -49,14 +63,14 @@ export enum Style {
   BOLD = 1 << 1,
 }
 
-const chalkOptions = process.env.GITHUB_ACTIONS
+const chalkOptions = CI.GITHUB_ACTIONS
   ? {level: 2}
   : chalk.supportsColor
     ? {level: chalk.supportsColor.level}
     : {level: 0};
 
 export const supportsColor = chalkOptions.level !== 0;
-export const supportsHyperlinks = supportsColor && !process.env.GITHUB_ACTIONS;
+export const supportsHyperlinks = supportsColor && !CI.GITHUB_ACTIONS && !CI.CIRCLE && !CI.GITLAB;
 
 const chalkInstance = new chalk.Instance(chalkOptions);
 
@@ -74,7 +88,7 @@ const colors = new Map<Type, [string, number] | null>([
   [Type.PATH, [`#d75fd7`, 170]],
   [Type.URL, [`#d75fd7`, 170]],
   [Type.ADDED, [`#5faf00`, 70]],
-  [Type.REMOVED, [`#d70000`, 160]],
+  [Type.REMOVED, [`#ff3131`, 160]],
   [Type.CODE, [`#87afff`, 111]],
 
   [Type.SIZE, [`#ffd700`, 220]],
@@ -88,17 +102,52 @@ const colors = new Map<Type, [string, number] | null>([
 // properly type the `format` method from Configuration. Since transforms are
 // internal to this file, it should be fine.
 const validateTransform = <T>(spec: {
-  pretty: (configuration: any, val: T) => string,
-  json: (val: T) => any
+  pretty: (configuration: any, val: T) => string;
+  json: (val: T) => any;
 }): {
-  pretty: (configuration: any, val: T) => string,
-  json: (val: T) => any,
+  pretty: (configuration: any, val: T) => string;
+  json: (val: T) => any;
 } => spec;
 
+function sizeToText(size: number) {
+  const thresholds = [`KiB`, `MiB`, `GiB`, `TiB`];
+
+  let power = thresholds.length;
+  while (power > 1 && size < 1024 ** power)
+    power -= 1;
+
+  const factor = 1024 ** power;
+  const value = Math.floor(size * 100 / factor) / 100;
+
+  return `${value} ${thresholds[power - 1]}`;
+}
+
 const transforms = {
+  [Type.ID]: validateTransform({
+    pretty: (configuration: Configuration, value: number | string) => {
+      if (typeof value === `number`) {
+        return applyColor(configuration, `${value}`, Type.NUMBER);
+      } else {
+        return applyColor(configuration, value, Type.CODE);
+      }
+    },
+    json: (id: number | string) => {
+      return id;
+    },
+  }),
+
+  [Type.INSPECT]: validateTransform({
+    pretty: (configuration: Configuration, value: any) => {
+      return inspect(value, {depth: Infinity, colors: configuration.get(`enableColors`), compact: true, breakLength: Infinity});
+    },
+    json: (value: any) => {
+      return value;
+    },
+  }),
+
   [Type.NUMBER]: validateTransform({
     pretty: (configuration: Configuration, value: number) => {
-      return `${value}`;
+      return applyColor(configuration, `${value}`, Type.NUMBER);
     },
     json: (value: number) => {
       return value;
@@ -185,6 +234,18 @@ const transforms = {
     },
   }),
 
+  [Type.SETTING]: validateTransform({
+    pretty: (configuration: Configuration, settingName: keyof ConfigurationValueMap) => {
+      // Asserts that the setting is valid
+      configuration.get(settingName);
+
+      return applyHyperlink(configuration, applyColor(configuration, settingName, Type.CODE), `https://yarnpkg.com/configuration/yarnrc#${settingName}`);
+    },
+    json: (settingName: string) => {
+      return settingName;
+    },
+  }),
+
   [Type.DURATION]: validateTransform({
     pretty: (configuration: Configuration, duration: number) => {
       if (duration > 1000 * 60) {
@@ -204,16 +265,22 @@ const transforms = {
 
   [Type.SIZE]: validateTransform({
     pretty: (configuration: Configuration, size: number) => {
-      const thresholds = [`KB`, `MB`, `GB`, `TB`];
+      return applyColor(configuration, sizeToText(size), Type.NUMBER);
+    },
+    json: (size: number) => {
+      return size;
+    },
+  }),
 
-      let power = thresholds.length;
-      while (power > 1 && size < 1024 ** power)
-        power -= 1;
+  [Type.SIZE_DIFF]: validateTransform({
+    pretty: (configuration: Configuration, size: number) => {
+      const sign = size >= 0 ? `+` : `-`;
 
-      const factor = 1024 ** power;
-      const value = Math.floor(size * 100 / factor) / 100;
+      // We're reversing the color logic here because, in general, an increase
+      // in size is typically seen as a bad thing, so it should be red
+      const type = sign === `+` ? Type.REMOVED : Type.ADDED;
 
-      return applyColor(configuration, `${value} ${thresholds[power - 1]}`, Type.NUMBER);
+      return applyColor(configuration, `${sign} ${sizeToText(Math.max(Math.abs(size), 1))}`, type);
     },
     json: (size: number) => {
       return size;
@@ -228,16 +295,49 @@ const transforms = {
       return npath.fromPortablePath(filePath) as string;
     },
   }),
+
+  [Type.MARKDOWN]: validateTransform({
+    pretty: (configuration: Configuration, {text, format, paragraphs}: {text: string, format: ColorFormat, paragraphs: boolean}) => {
+      return formatMarkdownish(text, {format, paragraphs});
+    },
+    json: ({text}: {text: string, format: ColorFormat, paragraphs: boolean}) => {
+      return text;
+    },
+  }),
+
+  [Type.MARKDOWN_INLINE]: validateTransform({
+    pretty: (configuration: Configuration, text: string) => {
+      // Highlight the code segments
+      text = text.replace(/(`+)((?:.|[\n])*?)\1/g, ($0, $1, $2) => {
+        return pretty(configuration, $1 + $2 + $1, Type.CODE);
+      });
+
+      // Highlight the bold segments
+      text = text.replace(/(\*\*)((?:.|[\n])*?)\1/g, ($0, $1, $2) => {
+        return applyStyle(configuration, $2, Style.BOLD);
+      });
+
+      return text;
+    },
+    json: (text: string) => {
+      return text;
+    },
+  }),
 };
 
 type AllTransforms = typeof transforms;
 
 export type Source<T> = T extends keyof AllTransforms
-  ? Parameters<AllTransforms[T]['json']>[0] | null
+  ? Parameters<AllTransforms[T][`json`]>[0] | null
   : string | null;
 
 export type Tuple<T extends Type = Type> =
   readonly [Source<T>, T];
+
+export type Field = {
+  label: string;
+  value: Tuple<any>;
+};
 
 export function tuple<T extends Type>(formatType: T, value: Source<T>): Tuple<T> {
   return [value, formatType];
@@ -279,11 +379,29 @@ export function applyColor(configuration: Configuration, value: string, formatTy
   return fn(value);
 }
 
+const isKonsole = !!process.env.KONSOLE_VERSION;
+
+export function applyHyperlink(configuration: Configuration, text: string, href: string) {
+  // Only print hyperlinks if allowed per configuration
+  if (!configuration.get(`enableHyperlinks`))
+    return text;
+
+  // We use ESC as ST for Konsole because it doesn't support
+  // the non-standard BEL character for hyperlinks
+  if (isKonsole)
+    return `\u001b]8;;${href}\u001b\\${text}\u001b]8;;\u001b\\`;
+
+  // We use BELL as ST because it seems that iTerm doesn't properly support
+  // the \x1b\\ sequence described in the reference document
+  // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#the-escape-sequence
+  return `\u001b]8;;${href}\u0007${text}\u001b]8;;\u0007`;
+}
+
 export function pretty<T extends Type>(configuration: Configuration, value: Source<T>, formatType: T | string): string {
   if (value === null)
     return applyColor(configuration, `null`, Type.NULL);
 
-  if (Object.prototype.hasOwnProperty.call(transforms, formatType)) {
+  if (Object.hasOwn(transforms, formatType)) {
     const transform = transforms[formatType as keyof typeof transforms];
     const typedTransform = transform as Extract<typeof transform, {pretty: (configuration: Configuration, val: Source<T>) => any}>;
     return typedTransform.pretty(configuration, value);
@@ -303,7 +421,7 @@ export function json<T extends Type>(value: Source<T>, formatType: T | string): 
   if (value === null)
     return null;
 
-  if (Object.prototype.hasOwnProperty.call(transforms, formatType)) {
+  if (Object.hasOwn(transforms, formatType)) {
     miscUtils.overrideType<keyof AllTransforms>(formatType);
     return transforms[formatType].json(value as never);
   }
@@ -314,12 +432,64 @@ export function json<T extends Type>(value: Source<T>, formatType: T | string): 
   return value;
 }
 
+export function jsonOrPretty<T extends Type>(outputJson: boolean, configuration: Configuration, [value, formatType]: Tuple<T>) {
+  return outputJson
+    ? json(value, formatType)
+    : pretty(configuration, value, formatType);
+}
+
 export function mark(configuration: Configuration) {
   return {
     Check: applyColor(configuration, `✓`, `green`),
     Cross: applyColor(configuration, `✘`, `red`),
     Question: applyColor(configuration, `?`, `cyan`),
   };
+}
+
+export function prettyField(configuration: Configuration, {label, value: [value, formatType]}: Field) {
+  return `${pretty(configuration, label, Type.CODE)}: ${pretty(configuration, value, formatType)}`;
+}
+
+export function prettyTruncatedLocatorList(configuration: Configuration, locators: Array<Locator>, recommendedLength: number) {
+  const named: Array<[string, number]> = [];
+  const locatorsCopy = [...locators];
+
+  let remainingLength = recommendedLength;
+  while (locatorsCopy.length > 0) {
+    const locator = locatorsCopy[0]!;
+
+    const asString = `${structUtils.prettyLocator(configuration, locator)}, `;
+    const asLength = structUtils.prettyLocatorNoColors(locator).length + 2;
+
+    if (named.length > 0 && remainingLength < asLength)
+      break;
+
+    named.push([asString, asLength]);
+    remainingLength -= asLength;
+
+    locatorsCopy.shift();
+  }
+
+  if (locatorsCopy.length === 0)
+    return named.map(([str]) => str).join(``)
+      // Don't forget the trailing ", "
+      .slice(0, -2);
+
+  const mark = `X`.repeat(locatorsCopy.length.toString().length);
+  const suffix = `and ${mark} more.`;
+
+  let otherCount = locatorsCopy.length;
+  while (named.length > 1 && remainingLength < suffix.length) {
+    remainingLength += named[named.length - 1][1];
+
+    otherCount += 1;
+    named.pop();
+  }
+
+  return [
+    named.map(([str]) => str).join(``),
+    suffix.replace(mark, pretty(configuration, otherCount, Type.NUMBER)),
+  ].join(``);
 }
 
 export enum LogLevel {
@@ -338,6 +508,7 @@ export function addLogFilterSupport(report: Report, {configuration}: {configurat
 
   const logFiltersByCode = new Map<string, LogLevel | null>();
   const logFiltersByText = new Map<string, LogLevel | null>();
+  const logFiltersByPatternMatcher: Array<[(str: string) => boolean, LogLevel | null]> = [];
 
   for (const filter of logFilters) {
     const level = filter.get(`level`);
@@ -349,19 +520,40 @@ export function addLogFilterSupport(report: Report, {configuration}: {configurat
       logFiltersByCode.set(code, level);
 
     const text = filter.get(`text`);
-    if (typeof text !== `undefined`) {
+    if (typeof text !== `undefined`)
       logFiltersByText.set(text, level);
+
+    const pattern = filter.get(`pattern`);
+    if (typeof pattern !== `undefined`) {
+      logFiltersByPatternMatcher.push([micromatch.matcher(pattern, {contains: true}), level]);
     }
   }
+
+  // Higher priority to the last patterns, just like other filters
+  logFiltersByPatternMatcher.reverse();
 
   const findLogLevel = (name: MessageName | null, text: string, defaultLevel: LogLevel) => {
     if (name === null || name === MessageName.UNNAMED)
       return defaultLevel;
 
+    // Avoid processing the string unless we know we'll actually need it
+    const strippedText = logFiltersByText.size > 0 || logFiltersByPatternMatcher.length > 0
+      ? stripAnsi(text)
+      : text;
+
     if (logFiltersByText.size > 0) {
-      const level = logFiltersByText.get(stripAnsi(text));
+      const level = logFiltersByText.get(strippedText);
+
       if (typeof level !== `undefined`) {
         return level ?? defaultLevel;
+      }
+    }
+
+    if (logFiltersByPatternMatcher.length > 0) {
+      for (const [filterMatcher, filterLevel] of logFiltersByPatternMatcher) {
+        if (filterMatcher(strippedText)) {
+          return filterLevel ?? defaultLevel;
+        }
       }
     }
 

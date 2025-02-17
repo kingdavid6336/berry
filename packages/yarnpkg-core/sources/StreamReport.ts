@@ -1,44 +1,49 @@
-import sliceAnsi                                  from '@arcanis/slice-ansi';
-import {Writable}                                 from 'stream';
+import sliceAnsi                                                                    from '@arcanis/slice-ansi';
+import CI                                                                           from 'ci-info';
+import {Writable}                                                                   from 'stream';
+import {WriteStream}                                                                from 'tty';
 
-import {Configuration}                            from './Configuration';
-import {MessageName, stringifyMessageName}        from './MessageName';
-import {ProgressDefinition, Report, TimerOptions} from './Report';
-import * as formatUtils                           from './formatUtils';
-import {Locator}                                  from './types';
+import {Configuration}                                                              from './Configuration';
+import {MessageName, stringifyMessageName}                                          from './MessageName';
+import {ProgressDefinition, Report, SectionOptions, TimerOptions, ProgressIterable} from './Report';
+import {YarnVersion}                                                                from './YarnVersion';
+import * as formatUtils                                                             from './formatUtils';
 
 export type StreamReportOptions = {
-  configuration: Configuration,
-  forgettableBufferSize?: number,
-  forgettableNames?: Set<MessageName | null>,
-  includeFooter?: boolean,
-  includeInfos?: boolean,
-  includeLogs?: boolean,
-  includeWarnings?: boolean,
-  json?: boolean,
-  stdout: Writable,
+  configuration: Configuration;
+  forceSectionAlignment?: boolean;
+  includeFooter?: boolean;
+  includeInfos?: boolean;
+  includeLogs?: boolean;
+  includeNames?: boolean;
+  includeVersion?: boolean;
+  includeWarnings?: boolean;
+  includePrefix?: boolean;
+  json?: boolean;
+  stdout: Writable;
 };
+
+export const SINGLE_LINE_CHAR = `·`;
 
 const PROGRESS_FRAMES = [`⠋`, `⠙`, `⠹`, `⠸`, `⠼`, `⠴`, `⠦`, `⠧`, `⠇`, `⠏`];
 const PROGRESS_INTERVAL = 80;
 
-const BASE_FORGETTABLE_NAMES = new Set<MessageName | null>([MessageName.FETCH_NOT_CACHED, MessageName.UNUSED_CACHE_ENTRY]);
-const BASE_FORGETTABLE_BUFFER_SIZE = 5;
-
-const GROUP = process.env.GITHUB_ACTIONS
+const GROUP = CI.GITHUB_ACTIONS
   ? {start: (what: string) => `::group::${what}\n`, end: (what: string) => `::endgroup::\n`}
-  : process.env.TRAVIS
+  : CI.TRAVIS
     ? {start: (what: string) => `travis_fold:start:${what}\n`, end: (what: string) => `travis_fold:end:${what}\n`}
-    : process.env.GITLAB_CI
-      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
+    : CI.GITLAB
+      ? {start: (what: string) => `section_start:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}[collapsed=true]\r\x1b[0K${what}\n`, end: (what: string) => `section_end:${Math.floor(Date.now() / 1000)}:${what.toLowerCase().replace(/\W+/g, `_`)}\r\x1b[0K`}
       : null;
+
+export const SUPPORTS_GROUPS = GROUP !== null;
 
 const now = new Date();
 
 // We only want to support environments that will out-of-the-box accept the
 // characters we want to use. Others can enforce the style from the project
 // configuration.
-const supportsEmojis = [`iTerm.app`, `Apple_Terminal`].includes(process.env.TERM_PROGRAM!) || !!process.env.WT_SESSION;
+const supportsEmojis = [`iTerm.app`, `Apple_Terminal`, `WarpTerminal`, `vscode`].includes(process.env.TERM_PROGRAM!) || !!process.env.WT_SESSION;
 
 const makeRecord = <T>(obj: {[key: string]: T}) => obj;
 const PROGRESS_STYLES = makeRecord({
@@ -96,10 +101,6 @@ export function formatNameWithHyperlink(name: MessageName | null, {configuration
   if (!code)
     return code;
 
-  // Only print hyperlinks if allowed per configuration
-  if (!configuration.get(`enableHyperlinks`))
-    return code;
-
   // Don't print hyperlinks for the generic messages
   if (name === null || name === MessageName.UNNAMED)
     return code;
@@ -107,11 +108,45 @@ export function formatNameWithHyperlink(name: MessageName | null, {configuration
   const desc = MessageName[name];
   const href = `https://yarnpkg.com/advanced/error-codes#${code}---${desc}`.toLowerCase();
 
-  // We use BELL as ST because it seems that iTerm doesn't properly support
-  // the \x1b\\ sequence described in the reference document
-  // https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#the-escape-sequence
+  return formatUtils.applyHyperlink(configuration, code, href);
+}
 
-  return `\u001b]8;;${href}\u0007${code}\u001b]8;;\u0007`;
+/**
+ * @internal
+ */
+export async function reportOptionDeprecations({configuration, stdout, forceError}: {configuration: Configuration, stdout: Writable, forceError?: boolean}, checks: Array<{option: unknown, message: string, error?: boolean, callback?: () => void}>) {
+  const deprecationReport = await StreamReport.start({
+    configuration,
+    stdout,
+    includeFooter: false,
+  }, async report => {
+    let hasWarnings = false;
+    let hasErrors = false;
+
+    for (const check of checks) {
+      if (typeof check.option !== `undefined`) {
+        if (check.error || forceError) {
+          hasErrors = true;
+          report.reportError(MessageName.DEPRECATED_CLI_SETTINGS, check.message);
+        } else {
+          hasWarnings = true;
+          report.reportWarning(MessageName.DEPRECATED_CLI_SETTINGS, check.message);
+        }
+
+        check.callback?.();
+      }
+    }
+
+    if (hasWarnings && !hasErrors) {
+      report.reportSeparator();
+    }
+  });
+
+  if (deprecationReport.hasErrors()) {
+    return deprecationReport.exitCode();
+  } else {
+    return null;
+  }
 }
 
 export class StreamReport extends Report {
@@ -134,6 +169,9 @@ export class StreamReport extends Report {
       report.reportWarning(MessageName.UNNAMED, fullMessage);
     };
 
+    if (opts.includeVersion)
+      report.reportInfo(MessageName.UNNAMED, formatUtils.applyStyle(opts.configuration, `Yarn ${YarnVersion}`, formatUtils.Style.BOLD));
+
     try {
       await cb(report);
     } catch (error) {
@@ -147,6 +185,9 @@ export class StreamReport extends Report {
   }
 
   private configuration: Configuration;
+  private forceSectionAlignment: boolean;
+  private includeNames: boolean;
+  private includePrefix: boolean;
   private includeFooter: boolean;
   private includeInfos: boolean;
   private includeWarnings: boolean;
@@ -154,68 +195,69 @@ export class StreamReport extends Report {
   private stdout: Writable;
 
   private uncommitted = new Set<{
-    committed: boolean,
-    action: () => void,
+    committed: boolean;
+    action: () => void;
   }>();
-
-  private cacheHitCount: number = 0;
-  private cacheMissCount: number = 0;
 
   private warningCount: number = 0;
   private errorCount: number = 0;
 
+  private timerFooter: Array<() => void> = [];
+
   private startTime: number = Date.now();
 
   private indent: number = 0;
+  private level: number = 0;
 
-  private progress: Map<AsyncIterable<ProgressDefinition>, {
-    definition: ProgressDefinition,
-    lastScaledSize: number,
+  private progress: Map<ProgressIterable, {
+    definition: ProgressDefinition;
+    lastScaledSize?: number;
+    lastTitle?: string;
   }> = new Map();
 
   private progressTime: number = 0;
   private progressFrame: number = 0;
   private progressTimeout: ReturnType<typeof setTimeout> | null = null;
-  private progressStyle: {date?: Array<number>, chars: Array<string>, size: number};
-  private progressMaxScaledSize: number;
-
-  private forgettableBufferSize: number;
-  private forgettableNames: Set<MessageName | null>;
-  private forgettableLines: Array<string> = [];
+  private progressStyle: {date?: Array<number>, chars: Array<string>, size: number} | null = null;
+  private progressMaxScaledSize: number | null = null;
 
   constructor({
     configuration,
     stdout,
     json = false,
+    forceSectionAlignment = false,
+    includeNames = true,
+    includePrefix = true,
     includeFooter = true,
     includeLogs = !json,
     includeInfos = includeLogs,
     includeWarnings = includeLogs,
-    forgettableBufferSize = BASE_FORGETTABLE_BUFFER_SIZE,
-    forgettableNames = new Set(),
   }: StreamReportOptions) {
     super();
 
     formatUtils.addLogFilterSupport(this, {configuration});
 
     this.configuration = configuration;
-    this.forgettableBufferSize = forgettableBufferSize;
-    this.forgettableNames = new Set([...forgettableNames, ...BASE_FORGETTABLE_NAMES]);
+    this.forceSectionAlignment = forceSectionAlignment;
+    this.includeNames = includeNames;
+    this.includePrefix = includePrefix;
     this.includeFooter = includeFooter;
     this.includeInfos = includeInfos;
     this.includeWarnings = includeWarnings;
     this.json = json;
     this.stdout = stdout;
 
-    const styleName = this.configuration.get(`progressBarStyle`) || defaultStyle;
-    if (!Object.prototype.hasOwnProperty.call(PROGRESS_STYLES, styleName))
-      throw new Error(`Assertion failed: Invalid progress bar style`);
+    // Setup progress
+    if (configuration.get(`enableProgressBars`) && !json && (stdout as WriteStream).isTTY && (stdout as WriteStream).columns > 22) {
+      const styleName = configuration.get(`progressBarStyle`) || defaultStyle;
+      if (!Object.hasOwn(PROGRESS_STYLES, styleName))
+        throw new Error(`Assertion failed: Invalid progress bar style`);
 
-    this.progressStyle = PROGRESS_STYLES[styleName];
-    const PAD_LEFT = `➤ YN0000: ┌ `.length;
+      this.progressStyle = PROGRESS_STYLES[styleName];
 
-    const maxWidth = Math.max(0, Math.min(process.stdout.columns - PAD_LEFT, 80));
-    this.progressMaxScaledSize = Math.floor(this.progressStyle.size * maxWidth / 80);
+      const maxWidth = Math.min(this.getRecommendedLength(), 80);
+      this.progressMaxScaledSize = Math.floor(this.progressStyle.size * maxWidth / 80);
+    }
   }
 
   hasErrors() {
@@ -226,34 +268,23 @@ export class StreamReport extends Report {
     return this.hasErrors() ? 1 : 0;
   }
 
-  reportCacheHit(locator: Locator) {
-    this.cacheHitCount += 1;
+  getRecommendedLength() {
+    const PREFIX_SIZE = `➤ YN0000: ⠋ `.length;
+
+    // The `- 1` is to account for terminals that would wrap after the last column rather before the first overwrite
+    const recommendedLength = this.progressStyle !== null
+      ? (this.stdout as WriteStream).columns - 1
+      : super.getRecommendedLength();
+
+    return Math.max(40, recommendedLength - PREFIX_SIZE - this.indent * 2);
   }
 
-  reportCacheMiss(locator: Locator, message?: string) {
-    this.cacheMissCount += 1;
-
-    if (typeof message !== `undefined` && !this.configuration.get(`preferAggregateCacheInfo`)) {
-      this.reportInfo(MessageName.FETCH_NOT_CACHED, message);
-    }
-  }
-
-  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): void;
-  startTimerSync<T>(what: string, cb: () => T): void;
-  startTimerSync<T>(what: string, opts: TimerOptions | (() => T), cb?: () => T) {
-    const realOpts = typeof opts === `function` ? {} : opts;
-    const realCb = typeof opts === `function` ? opts : cb!;
-
+  startSectionSync<T>({reportHeader, reportFooter, skipIfEmpty}: SectionOptions, cb: () => T) {
     const mark = {committed: false, action: () => {
-      this.reportInfo(null, `┌ ${what}`);
-      this.indent += 1;
-
-      if (GROUP !== null) {
-        this.stdout.write(GROUP.start(what));
-      }
+      reportHeader?.();
     }};
 
-    if (realOpts.skipIfEmpty) {
+    if (skipIfEmpty) {
       this.uncommitted.add(mark);
     } else {
       mark.action();
@@ -263,7 +294,7 @@ export class StreamReport extends Report {
     const before = Date.now();
 
     try {
-      return realCb();
+      return cb();
     } catch (error) {
       this.reportExceptionOnce(error);
       throw error;
@@ -272,36 +303,17 @@ export class StreamReport extends Report {
 
       this.uncommitted.delete(mark);
       if (mark.committed) {
-        this.indent -= 1;
-
-        if (GROUP !== null)
-          this.stdout.write(GROUP.end(what));
-
-        if (this.configuration.get(`enableTimers`) && after - before > 200) {
-          this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
-        } else {
-          this.reportInfo(null, `└ Completed`);
-        }
+        reportFooter?.(after - before);
       }
     }
   }
 
-  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<void>;
-  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<void>;
-  async startTimerPromise<T>(what: string, opts: TimerOptions | (() => Promise<T>), cb?: () => Promise<T>) {
-    const realOpts = typeof opts === `function` ? {} : opts;
-    const realCb = typeof opts === `function` ? opts : cb!;
-
+  async startSectionPromise<T>({reportHeader, reportFooter, skipIfEmpty}: SectionOptions, cb: () => Promise<T>) {
     const mark = {committed: false, action: () => {
-      this.reportInfo(null, `┌ ${what}`);
-      this.indent += 1;
-
-      if (GROUP !== null) {
-        this.stdout.write(GROUP.start(what));
-      }
+      reportHeader?.();
     }};
 
-    if (realOpts.skipIfEmpty) {
+    if (skipIfEmpty) {
       this.uncommitted.add(mark);
     } else {
       mark.action();
@@ -309,35 +321,6 @@ export class StreamReport extends Report {
     }
 
     const before = Date.now();
-
-    try {
-      return await realCb();
-    } catch (error) {
-      this.reportExceptionOnce(error);
-      throw error;
-    } finally {
-      const after = Date.now();
-
-      this.uncommitted.delete(mark);
-      if (mark.committed) {
-        this.indent -= 1;
-
-        if (GROUP !== null)
-          this.stdout.write(GROUP.end(what));
-
-        if (this.configuration.get(`enableTimers`) && after - before > 200) {
-          this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, after - before, formatUtils.Type.DURATION)}`);
-        } else {
-          this.reportInfo(null, `└ Completed`);
-        }
-      }
-    }
-  }
-
-  async startCacheReport<T>(cb: () => Promise<T>) {
-    const cacheInfo = this.configuration.get(`preferAggregateCacheInfo`)
-      ? {cacheHitCount: this.cacheHitCount, cacheMissCount: this.cacheMissCount}
-      : null;
 
     try {
       return await cb();
@@ -345,15 +328,69 @@ export class StreamReport extends Report {
       this.reportExceptionOnce(error);
       throw error;
     } finally {
-      if (cacheInfo !== null) {
-        this.reportCacheChanges(cacheInfo);
+      const after = Date.now();
+
+      this.uncommitted.delete(mark);
+      if (mark.committed) {
+        reportFooter?.(after - before);
       }
     }
   }
 
+  private startTimerImpl<Callback extends Function>(what: string, opts: TimerOptions | Callback, cb?: Callback) {
+    const realOpts = typeof opts === `function` ? {} : opts;
+    const realCb = typeof opts === `function` ? opts : cb!;
+
+    return {
+      cb: realCb,
+      reportHeader: () => {
+        this.level += 1;
+
+        this.reportInfo(null, `┌ ${what}`);
+        this.indent += 1;
+
+        if (GROUP !== null && !this.json && this.includeInfos) {
+          this.stdout.write(GROUP.start(what));
+        }
+      },
+      reportFooter: elapsedTime => {
+        this.indent -= 1;
+
+        if (GROUP !== null && !this.json && this.includeInfos) {
+          this.stdout.write(GROUP.end(what));
+          for (const cb of this.timerFooter) {
+            cb();
+          }
+        }
+
+        if (this.configuration.get(`enableTimers`) && elapsedTime > 200)
+          this.reportInfo(null, `└ Completed in ${formatUtils.pretty(this.configuration, elapsedTime, formatUtils.Type.DURATION)}`);
+        else
+          this.reportInfo(null, `└ Completed`);
+
+        this.level -= 1;
+      },
+      skipIfEmpty: realOpts.skipIfEmpty,
+    } as SectionOptions & {cb: Callback};
+  }
+
+  startTimerSync<T>(what: string, opts: TimerOptions, cb: () => T): T;
+  startTimerSync<T>(what: string, cb: () => T): T;
+  startTimerSync<T>(what: string, opts: TimerOptions | (() => T), cb?: () => T) {
+    const {cb: realCb, ...sectionOps} = this.startTimerImpl(what, opts, cb);
+    return this.startSectionSync(sectionOps, realCb);
+  }
+
+  async startTimerPromise<T>(what: string, opts: TimerOptions, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, cb: () => Promise<T>): Promise<T>;
+  async startTimerPromise<T>(what: string, opts: TimerOptions | (() => Promise<T>), cb?: () => Promise<T>) {
+    const {cb: realCb, ...sectionOps} = this.startTimerImpl(what, opts, cb);
+    return this.startSectionPromise(sectionOps, realCb);
+  }
+
   reportSeparator() {
     if (this.indent === 0) {
-      this.writeLineWithForgettableReset(``);
+      this.writeLine(``);
     } else {
       this.reportInfo(null, ``);
     }
@@ -367,23 +404,10 @@ export class StreamReport extends Report {
 
     const formattedName = this.formatNameWithHyperlink(name);
     const prefix = formattedName ? `${formattedName}: ` : ``;
-
-    const message = `${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${prefix}${this.formatIndent()}${text}`;
+    const message = `${this.formatPrefix(prefix, `blueBright`)}${text}`;
 
     if (!this.json) {
-      if (this.forgettableNames.has(name)) {
-        this.forgettableLines.push(message);
-        if (this.forgettableLines.length > this.forgettableBufferSize) {
-          while (this.forgettableLines.length > this.forgettableBufferSize)
-            this.forgettableLines.shift();
-
-          this.writeLines(this.forgettableLines, {truncate: true});
-        } else {
-          this.writeLine(message, {truncate: true});
-        }
-      } else {
-        this.writeLineWithForgettableReset(message);
-      }
+      this.writeLine(message);
     } else {
       this.reportJson({type: `info`, name, displayName: this.formatName(name), indent: this.formatIndent(), data: text});
     }
@@ -401,7 +425,7 @@ export class StreamReport extends Report {
     const prefix = formattedName ? `${formattedName}: ` : ``;
 
     if (!this.json) {
-      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `yellowBright`)} ${prefix}${this.formatIndent()}${text}`);
+      this.writeLine(`${this.formatPrefix(prefix, `yellowBright`)}${text}`);
     } else {
       this.reportJson({type: `warning`, name, displayName: this.formatName(name), indent: this.formatIndent(), data: text});
     }
@@ -409,43 +433,65 @@ export class StreamReport extends Report {
 
   reportError(name: MessageName, text: string) {
     this.errorCount += 1;
+    this.timerFooter.push(() => this.reportErrorImpl(name, text));
 
+    this.reportErrorImpl(name, text);
+  }
+
+  reportErrorImpl(name: MessageName, text: string) {
     this.commit();
 
     const formattedName = this.formatNameWithHyperlink(name);
     const prefix = formattedName ? `${formattedName}: ` : ``;
 
     if (!this.json) {
-      this.writeLineWithForgettableReset(`${formatUtils.pretty(this.configuration, `➤`, `redBright`)} ${prefix}${this.formatIndent()}${text}`, {truncate: false});
+      this.writeLine(`${this.formatPrefix(prefix, `redBright`)}${text}`, {truncate: false});
     } else {
       this.reportJson({type: `error`, name, displayName: this.formatName(name), indent: this.formatIndent(), data: text});
     }
   }
 
-  reportProgress(progressIt: AsyncIterable<{progress: number, title?: string}>) {
+  reportFold(title: string, text: string) {
+    if (!GROUP)
+      return;
+
+    const message = `${GROUP.start(title)}${text}${GROUP.end(title)}`;
+    this.timerFooter.push(() => this.stdout.write(message));
+  }
+
+  reportProgress(progressIt: ProgressIterable) {
+    if (this.progressStyle === null)
+      return {...Promise.resolve(), stop: () => {}};
+
+    if (progressIt.hasProgress && progressIt.hasTitle)
+      throw new Error(`Unimplemented: Progress bars can't have both progress and titles.`);
+
     let stopped = false;
 
     const promise = Promise.resolve().then(async () => {
       const progressDefinition: ProgressDefinition = {
-        progress: 0,
-        title: undefined,
+        progress: progressIt.hasProgress ? 0 : undefined,
+        title: progressIt.hasTitle ? `` : undefined,
       };
 
       this.progress.set(progressIt, {
         definition: progressDefinition,
-        lastScaledSize: -1,
+        lastScaledSize: progressIt.hasProgress ? -1 : undefined,
+        lastTitle: undefined,
       });
 
-      this.refreshProgress(-1);
+      this.refreshProgress({delta: -1});
 
       for await (const {progress, title} of progressIt) {
         if (stopped)
           continue;
+
         if (progressDefinition.progress === progress && progressDefinition.title === title)
           continue;
 
         progressDefinition.progress = progress;
         progressDefinition.title = title;
+
         this.refreshProgress();
       }
 
@@ -459,7 +505,7 @@ export class StreamReport extends Report {
       stopped = true;
 
       this.progress.delete(progressIt);
-      this.refreshProgress(+1);
+      this.refreshProgress({delta: +1});
     };
 
     return {...promise, stop};
@@ -467,7 +513,7 @@ export class StreamReport extends Report {
 
   reportJson(data: any) {
     if (this.json) {
-      this.writeLineWithForgettableReset(`${JSON.stringify(data)}`);
+      this.writeLine(`${JSON.stringify(data)}`);
     }
   }
 
@@ -504,11 +550,6 @@ export class StreamReport extends Report {
     this.writeProgress();
   }
 
-  private writeLineWithForgettableReset(str: string, {truncate}: {truncate?: boolean} = {}) {
-    this.forgettableLines = [];
-    this.writeLine(str, {truncate});
-  }
-
   private writeLines(lines: Array<string>, {truncate}: {truncate?: boolean} = {}) {
     this.clearProgress({delta: lines.length});
 
@@ -516,39 +557,6 @@ export class StreamReport extends Report {
       this.stdout.write(`${this.truncate(line, {truncate})}\n`);
 
     this.writeProgress();
-  }
-
-  private reportCacheChanges({cacheHitCount, cacheMissCount}: {cacheHitCount: number, cacheMissCount: number}) {
-    const cacheHitDelta = this.cacheHitCount - cacheHitCount;
-    const cacheMissDelta = this.cacheMissCount - cacheMissCount;
-
-    if (cacheHitDelta === 0 && cacheMissDelta === 0)
-      return;
-
-    let fetchStatus = ``;
-
-    if (this.cacheHitCount > 1)
-      fetchStatus += `${this.cacheHitCount} packages were already cached`;
-    else if (this.cacheHitCount === 1)
-      fetchStatus += ` - one package was already cached`;
-    else
-      fetchStatus += `No packages were cached`;
-
-    if (this.cacheHitCount > 0) {
-      if (this.cacheMissCount > 1) {
-        fetchStatus += `, ${this.cacheMissCount} had to be fetched`;
-      } else if (this.cacheMissCount === 1) {
-        fetchStatus += `, one had to be fetched`;
-      }
-    } else {
-      if (this.cacheMissCount > 1) {
-        fetchStatus += ` - ${this.cacheMissCount} packages had to be fetched`;
-      } else if (this.cacheMissCount === 1) {
-        fetchStatus += ` - one package had to be fetched`;
-      }
-    }
-
-    this.reportInfo(MessageName.FETCH_NOT_CACHED, fetchStatus);
   }
 
   private commit() {
@@ -562,7 +570,7 @@ export class StreamReport extends Report {
   }
 
   private clearProgress({delta = 0, clear = false}: {delta?: number, clear?: boolean}) {
-    if (!this.configuration.get(`enableProgressBars`) || this.json)
+    if (this.progressStyle === null)
       return;
 
     if (this.progress.size + delta > 0) {
@@ -574,7 +582,7 @@ export class StreamReport extends Report {
   }
 
   private writeProgress() {
-    if (!this.configuration.get(`enableProgressBars`) || this.json)
+    if (this.progressStyle === null)
       return;
 
     if (this.progressTimeout !== null)
@@ -595,33 +603,45 @@ export class StreamReport extends Report {
     const spinner = PROGRESS_FRAMES[this.progressFrame];
 
     for (const progress of this.progress.values()) {
-      const ok = this.progressStyle.chars[0].repeat(progress.lastScaledSize);
-      const ko = this.progressStyle.chars[1].repeat(this.progressMaxScaledSize - progress.lastScaledSize);
+      let progressBar = ``;
+
+      if (typeof progress.lastScaledSize !== `undefined`) {
+        const ok = this.progressStyle.chars[0].repeat(progress.lastScaledSize);
+        const ko = this.progressStyle.chars[1].repeat(this.progressMaxScaledSize! - progress.lastScaledSize);
+        progressBar = ` ${ok}${ko}`;
+      }
 
       const formattedName = this.formatName(null);
       const prefix = formattedName ? `${formattedName}: ` : ``;
+      const title = progress.definition.title ? ` ${progress.definition.title}` : ``;
 
-      this.stdout.write(`${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${prefix}${spinner} ${ok}${ko}\n`);
+      this.stdout.write(`${formatUtils.pretty(this.configuration, `➤`, `blueBright`)} ${prefix}${spinner}${progressBar}${title}\n`);
     }
 
     this.progressTimeout = setTimeout(() => {
-      this.refreshProgress();
+      this.refreshProgress({force: true});
     }, PROGRESS_INTERVAL);
   }
 
-  private refreshProgress(delta: number = 0) {
+  private refreshProgress({delta = 0, force = false}: {delta?: number, force?: boolean} = {}) {
     let needsUpdate = false;
+    let needsClear = false;
 
-    if (this.progress.size === 0) {
+    if (force || this.progress.size === 0) {
       needsUpdate = true;
     } else {
       for (const progress of this.progress.values()) {
-        const refreshedScaledSize = Math.trunc(this.progressMaxScaledSize * progress.definition.progress);
+        const refreshedScaledSize = typeof progress.definition.progress !== `undefined`
+          ? Math.trunc(this.progressMaxScaledSize! * progress.definition.progress)
+          : undefined;
 
         const previousScaledSize = progress.lastScaledSize;
         progress.lastScaledSize = refreshedScaledSize;
 
-        if (refreshedScaledSize !== previousScaledSize) {
+        const previousTitle = progress.lastTitle;
+        progress.lastTitle = progress.definition.title;
+
+        if ((refreshedScaledSize !== previousScaledSize) || (needsClear = previousTitle !== progress.definition.title)) {
           needsUpdate = true;
           break;
         }
@@ -629,13 +649,13 @@ export class StreamReport extends Report {
     }
 
     if (needsUpdate) {
-      this.clearProgress({delta});
+      this.clearProgress({delta, clear: needsClear});
       this.writeProgress();
     }
   }
 
   private truncate(str: string, {truncate}: {truncate?: boolean} = {}) {
-    if (!this.configuration.get(`enableProgressBars`))
+    if (this.progressStyle === null)
       truncate = false;
 
     if (typeof truncate === `undefined`)
@@ -644,19 +664,31 @@ export class StreamReport extends Report {
     // The -1 is to account for terminals that would wrap after
     // the last column rather before the first overwrite
     if (truncate)
-      str = sliceAnsi(str, 0, process.stdout.columns - 1);
+      str = sliceAnsi(str, 0, (this.stdout as WriteStream).columns - 1);
 
     return str;
   }
 
   private formatName(name: MessageName | null) {
+    if (!this.includeNames)
+      return ``;
+
     return formatName(name, {
       configuration: this.configuration,
       json: this.json,
     });
   }
 
+  private formatPrefix(prefix: string, caretColor: string) {
+    return this.includePrefix
+      ? `${formatUtils.pretty(this.configuration, `➤`, caretColor)} ${prefix}${this.formatIndent()}`
+      : ``;
+  }
+
   private formatNameWithHyperlink(name: MessageName | null) {
+    if (!this.includeNames)
+      return ``;
+
     return formatNameWithHyperlink(name, {
       configuration: this.configuration,
       json: this.json,
@@ -664,6 +696,8 @@ export class StreamReport extends Report {
   }
 
   private formatIndent() {
-    return `│ `.repeat(this.indent);
+    return this.level > 0 || !this.forceSectionAlignment
+      ? `│ `.repeat(this.indent)
+      : `${SINGLE_LINE_CHAR} `;
   }
 }

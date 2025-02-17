@@ -1,22 +1,15 @@
-import {WorkspaceRequiredError}                                                                                 from '@yarnpkg/cli';
-import {CommandContext, Configuration, MessageName, Project, StreamReport, Workspace, formatUtils, structUtils} from '@yarnpkg/core';
-import {ppath}                                                                                                  from '@yarnpkg/fslib';
-import {Gem}                                                                                                    from '@yarnpkg/libui/sources/components/Gem';
-import {ScrollableItems}                                                                                        from '@yarnpkg/libui/sources/components/ScrollableItems';
-import {FocusRequest}                                                                                           from '@yarnpkg/libui/sources/hooks/useFocusRequest';
-import {useListInput}                                                                                           from '@yarnpkg/libui/sources/hooks/useListInput';
-import {renderForm}                                                                                             from '@yarnpkg/libui/sources/misc/renderForm';
-import {Command, Option, Usage, UsageError}                                                                     from 'clipanion';
-import {Box, Text}                                                                                              from 'ink';
-import React, {useCallback, useState}                                                                           from 'react';
-import semver                                                                                                   from 'semver';
+import {BaseCommand, WorkspaceRequiredError}                                                    from '@yarnpkg/cli';
+import {Configuration, MessageName, Project, StreamReport, Workspace, formatUtils, structUtils} from '@yarnpkg/core';
+import {npath}                                                                                  from '@yarnpkg/fslib';
+import type {FocusRequest}                                                                      from '@yarnpkg/libui/sources/hooks/useFocusRequest';
+import * as libuiUtils                                                                          from '@yarnpkg/libui/sources/libuiUtils';
+import {Command, Option, Usage, UsageError}                                                     from 'clipanion';
+import semver                                                                                   from 'semver';
 
-import * as versionUtils                                                                                        from '../../versionUtils';
-
-type Releases = Map<Workspace, Exclude<versionUtils.Decision, versionUtils.Decision.UNDECIDED>>;
+import * as versionUtils                                                                        from '../../versionUtils';
 
 // eslint-disable-next-line arca/no-default-export
-export default class VersionCheckCommand extends Command<CommandContext> {
+export default class VersionCheckCommand extends BaseCommand {
   static paths = [
     [`version`, `check`],
   ];
@@ -52,6 +45,16 @@ export default class VersionCheckCommand extends Command<CommandContext> {
   }
 
   async executeInteractive() {
+    libuiUtils.checkRequirements(this.context);
+
+    const {Gem} = await import(`@yarnpkg/libui/sources/components/Gem`);
+    const {ScrollableItems} = await import(`@yarnpkg/libui/sources/components/ScrollableItems`);
+    const {FocusRequest} = await import(`@yarnpkg/libui/sources/hooks/useFocusRequest`);
+    const {useListInput} = await import(`@yarnpkg/libui/sources/hooks/useListInput`);
+    const {renderForm} = await import(`@yarnpkg/libui/sources/misc/renderForm`);
+    const {Box, Text} = await import(`ink`);
+    const {default: React, useCallback, useState} = await import(`react`);
+
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
     const {project, workspace} = await Project.find(configuration, this.context.cwd);
 
@@ -69,28 +72,28 @@ export default class VersionCheckCommand extends Command<CommandContext> {
 
     const Prompt = () => {
       return (
-        <Box flexDirection="row" paddingBottom={1}>
-          <Box flexDirection="column" width={60}>
+        <Box flexDirection={`row`} paddingBottom={1}>
+          <Box flexDirection={`column`} width={60}>
             <Box>
               <Text>
-                Press <Text bold color="cyanBright">{`<up>`}</Text>/<Text bold color="cyanBright">{`<down>`}</Text> to select workspaces.
+                Press <Text bold color={`cyanBright`}>{`<up>`}</Text>/<Text bold color={`cyanBright`}>{`<down>`}</Text> to select workspaces.
               </Text>
             </Box>
             <Box>
               <Text>
-                 Press <Text bold color="cyanBright">{`<left>`}</Text>/<Text bold color="cyanBright">{`<right>`}</Text> to select release strategies.
+                Press <Text bold color={`cyanBright`}>{`<left>`}</Text>/<Text bold color={`cyanBright`}>{`<right>`}</Text> to select release strategies.
               </Text>
             </Box>
           </Box>
-          <Box flexDirection="column">
+          <Box flexDirection={`column`}>
             <Box marginLeft={1}>
               <Text>
-                Press <Text bold color="cyanBright">{`<enter>`}</Text> to save.
+                Press <Text bold color={`cyanBright`}>{`<enter>`}</Text> to save.
               </Text>
             </Box>
             <Box marginLeft={1}>
               <Text>
-                Press <Text bold color="cyanBright">{`<ctrl+c>`}</Text> to abort.
+                Press <Text bold color={`cyanBright`}>{`<ctrl+c>`}</Text> to abort.
               </Text>
             </Box>
           </Box>
@@ -98,14 +101,21 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       );
     };
 
-    const Undecided = ({workspace, active, decision, setDecision}: {workspace: Workspace, active?: boolean, decision: versionUtils.Decision, setDecision: (decision: versionUtils.Decision) => void}) => {
-      const currentVersion = workspace.manifest.version;
+    const Undecided = ({workspace, active, decision, setDecision}: {workspace: Workspace, active?: boolean, decision: string, setDecision: (decision: versionUtils.Decision) => void}) => {
+      const currentVersion = workspace.manifest.raw.stableVersion ?? workspace.manifest.version;
       if (currentVersion === null)
         throw new Error(`Assertion failed: The version should have been set (${structUtils.prettyLocator(configuration, workspace.anchoredLocator)})`);
 
-      const strategies: Array<versionUtils.Decision> = semver.prerelease(currentVersion) === null
-        ? [versionUtils.Decision.UNDECIDED, versionUtils.Decision.DECLINE, versionUtils.Decision.PATCH, versionUtils.Decision.MINOR, versionUtils.Decision.MAJOR, versionUtils.Decision.PRERELEASE]
-        : [versionUtils.Decision.UNDECIDED, versionUtils.Decision.DECLINE, versionUtils.Decision.PRERELEASE, versionUtils.Decision.MAJOR];
+      if (semver.prerelease(currentVersion) !== null)
+        throw new Error(`Assertion failed: Prerelease identifiers shouldn't be found (${currentVersion})`);
+
+      const strategies: Array<versionUtils.Decision> = [
+        versionUtils.Decision.UNDECIDED,
+        versionUtils.Decision.DECLINE,
+        versionUtils.Decision.PATCH,
+        versionUtils.Decision.MINOR,
+        versionUtils.Decision.MAJOR,
+      ];
 
       useListInput(decision, strategies, {
         active: active!,
@@ -115,10 +125,14 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       });
 
       const nextVersion = decision === versionUtils.Decision.UNDECIDED
-        ? <Text color="yellow">{currentVersion}</Text>
+        ? <Text color={`yellow`}>{currentVersion}</Text>
         : decision === versionUtils.Decision.DECLINE
-          ? <Text color="green">{currentVersion}</Text>
-          : <Text><Text color="magenta">{currentVersion}</Text> → <Text color="green">{semver.inc(currentVersion, decision)}</Text></Text>;
+          ? <Text color={`green`}>{currentVersion}</Text>
+          : <Text><Text color={`magenta`}>{currentVersion}</Text> → <Text color={`green`}>{
+            semver.valid(decision)
+              ? decision
+              : semver.inc(currentVersion, decision as versionUtils.IncrementDecision)
+          }</Text></Text>;
 
       return (
         <Box flexDirection={`column`}>
@@ -143,7 +157,7 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       );
     };
 
-    const getRelevancy = (releases: Releases) => {
+    const getRelevancy = (releases: versionUtils.Releases) => {
       // Now, starting from all the workspaces that changed, we'll detect
       // which ones are affected by the choices that the user picked. By
       // doing this we'll "forget" all choices that aren't relevant any
@@ -190,8 +204,8 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       };
     };
 
-    const useReleases = (): [Releases, (workspace: Workspace, decision: versionUtils.Decision) => void] => {
-      const [releases, setReleases] = useState<Releases>(() => new Map(versionFile.releases));
+    const useReleases = (): [versionUtils.Releases, (workspace: Workspace, decision: versionUtils.Decision) => void] => {
+      const [releases, setReleases] = useState<versionUtils.Releases>(() => new Map(versionFile.releases));
 
       const setWorkspaceRelease = useCallback((workspace: Workspace, decision: versionUtils.Decision) => {
         const copy = new Map(releases);
@@ -208,7 +222,7 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       return [releases, setWorkspaceRelease];
     };
 
-    const Stats = ({workspaces, releases}: {workspaces: Set<Workspace>, releases: Releases}) => {
+    const Stats = ({workspaces, releases}: {workspaces: Set<Workspace>, releases: versionUtils.Releases}) => {
       const parts = [];
       parts.push(`${workspaces.size} total`);
 
@@ -227,10 +241,10 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       parts.push(`${releaseCount} release${releaseCount === 1 ? `` : `s`}`);
       parts.push(`${remainingCount} remaining`);
 
-      return <Text color="yellow">{parts.join(`, `)}</Text>;
+      return <Text color={`yellow`}>{parts.join(`, `)}</Text>;
     };
 
-    const App = ({useSubmit}: {useSubmit: (value: Releases) => void}) => {
+    const App = ({useSubmit}: {useSubmit: (value: versionUtils.Releases) => void}) => {
       const [releases, setWorkspaceRelease] = useReleases();
       useSubmit(releases);
 
@@ -256,7 +270,7 @@ export default class VersionCheckCommand extends Command<CommandContext> {
         <Box flexDirection={`column`}>
           <Prompt />
           <Box>
-            <Text wrap="wrap">
+            <Text wrap={`wrap`}>
               The following files have been modified in your local checkout.
             </Text>
           </Box>
@@ -264,14 +278,14 @@ export default class VersionCheckCommand extends Command<CommandContext> {
             {[...versionFile.changedFiles].map(file => (
               <Box key={file}>
                 <Text>
-                  <Text color="grey">{versionFile.root}</Text>/{ppath.relative(versionFile.root, file)}
+                  <Text color={`grey`}>{npath.fromPortablePath(versionFile.root)}</Text>{npath.sep}{npath.relative(npath.fromPortablePath(versionFile.root), npath.fromPortablePath(file))}
                 </Text>
               </Box>
             ))}
           </Box>
           {versionFile.releaseRoots.size > 0 && <>
             <Box marginTop={1}>
-              <Text wrap="wrap">
+              <Text wrap={`wrap`}>
                 Because of those files having been modified, the following workspaces may need to be released again (note that private workspaces are also shown here, because even though they won't be published, releasing them will allow us to flag their dependents for potential re-release):
               </Text>
             </Box>
@@ -289,13 +303,13 @@ export default class VersionCheckCommand extends Command<CommandContext> {
           {dependentWorkspaces.size > 0 ? (
             <>
               <Box marginTop={1}>
-                <Text wrap="wrap">
+                <Text wrap={`wrap`}>
                   The following workspaces depend on other workspaces that have been marked for release, and thus may need to be released as well:
                 </Text>
               </Box>
               <Box>
                 <Text>
-                  (Press <Text bold color="cyanBright">{`<tab>`}</Text> to move the focus between the workspace groups.)
+                  (Press <Text bold color={`cyanBright`}>{`<tab>`}</Text> to move the focus between the workspace groups.)
                 </Text>
               </Box>
               {dependentWorkspaces.size > 5 ? (
@@ -316,7 +330,11 @@ export default class VersionCheckCommand extends Command<CommandContext> {
       );
     };
 
-    const decisions = await renderForm<Releases>(App, {versionFile});
+    const decisions = await renderForm<versionUtils.Releases>(App, {versionFile}, {
+      stdin: this.context.stdin,
+      stdout: this.context.stdout,
+      stderr: this.context.stderr,
+    });
     if (typeof decisions === `undefined`)
       return 1;
 
@@ -357,7 +375,7 @@ export default class VersionCheckCommand extends Command<CommandContext> {
         report.reportSeparator();
 
         for (const file of versionFile.changedFiles) {
-          report.reportInfo(null, `${formatUtils.pretty(configuration, versionFile.root, `gray`)}/${ppath.relative(versionFile.root, file)}`);
+          report.reportInfo(null, `${formatUtils.pretty(configuration, npath.fromPortablePath(versionFile.root), `gray`)}${npath.sep}${npath.relative(npath.fromPortablePath(versionFile.root), npath.fromPortablePath(file))}`);
         }
       }
 

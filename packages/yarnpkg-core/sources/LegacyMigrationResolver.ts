@@ -1,15 +1,15 @@
-import {xfs, ppath}                                      from '@yarnpkg/fslib';
+import {xfs, ppath, Filename}                            from '@yarnpkg/fslib';
 import {parseSyml}                                       from '@yarnpkg/parsers';
-import semver                                            from 'semver';
 
 import {MessageName}                                     from './MessageName';
 import {Project}                                         from './Project';
 import {Report}                                          from './Report';
 import {Resolver, ResolveOptions, MinimalResolveOptions} from './Resolver';
+import * as semverUtils                                  from './semverUtils';
 import * as structUtils                                  from './structUtils';
-import {DescriptorHash, Descriptor, Locator}             from './types';
+import {DescriptorHash, Descriptor, Locator, Package}    from './types';
 
-const IMPORTED_PATTERNS: Array<[RegExp, (version: string, ...args: Array<string>) => string]> = [
+export const IMPORTED_PATTERNS: Array<[RegExp, (version: string, ...args: Array<string>) => string]> = [
   // These ones come from Git urls
   [/^(git(?:\+(?:https|ssh))?:\/\/.*(?:\.git)?)#(.*)$/, (version, $0, $1, $2) => `${$1}#commit=${$2}`],
 
@@ -19,13 +19,13 @@ const IMPORTED_PATTERNS: Array<[RegExp, (version: string, ...args: Array<string>
 
   // These ones come from the npm registry
   // Note: /download/ is used by custom registries like Taobao
-  [/^https?:\/\/[^/]+\/(?:[^/]+\/)*(?:@[^/]+\/)?([^/]+)\/(?:-|download)\/\1-[^/]+\.tgz(?:#|$)/, version => `npm:${version}`],
+  [/^https?:\/\/[^/]+\/(?:[^/]+\/)*(?:@.+(?:\/|(?:%2f)))?([^/]+)\/(?:-|download)\/\1-[^/]+\.tgz(?:#|$)/, version => `npm:${version}`],
   // The GitHub package registry uses a different style of URLs
-  [/^https:\/\/npm\.pkg\.github\.com\/download\/(?:@[^/]+)\/(?:[^/]+)\/(?:[^/]+)\/(?:[0-9a-f]+)$/, version => `npm:${version}`],
+  [/^https:\/\/npm\.pkg\.github\.com\/download\/(?:@[^/]+)\/(?:[^/]+)\/(?:[^/]+)\/(?:[0-9a-f]+)(?:#|$)/, version => `npm:${version}`],
   // FontAwesome too; what is it with these registries that made them think using a different url pattern was a good idea?
   [/^https:\/\/npm\.fontawesome\.com\/(?:@[^/]+)\/([^/]+)\/-\/([^/]+)\/\1-\2.tgz(?:#|$)/, version => `npm:${version}`],
-  // JFrog
-  [/^https?:\/\/(?:[^\\.]+)\.jfrog\.io\/.*\/(@[^/]+)\/([^/]+)\/-\/\1\/\2-(?:[.\d\w-]+)\.tgz(?:#|$)/, (version, $0) => structUtils.makeRange({protocol: `npm:`, source: null, selector: version, params: {__archiveUrl: $0}})],
+  // JFrog, or Artifactory deployments at arbitrary domain names
+  [/^https?:\/\/[^/]+\/.*\/(@[^/]+)\/([^/]+)\/-\/\1\/\2-(?:[.\d\w-]+)\.tgz(?:#|$)/, (version, $0) => structUtils.makeRange({protocol: `npm:`, source: null, selector: version, params: {__archiveUrl: $0}})],
 
   // These ones come from the old Yarn offline mirror - we assume they came from npm
   [/^[^/]+\.tgz#[0-9a-f]+$/, version => `npm:${version}`],
@@ -34,8 +34,10 @@ const IMPORTED_PATTERNS: Array<[RegExp, (version: string, ...args: Array<string>
 export class LegacyMigrationResolver implements Resolver {
   private resolutions: Map<DescriptorHash, Locator> | null = null;
 
+  constructor(private readonly resolver: Resolver) { }
+
   async setup(project: Project, {report}: {report: Report}) {
-    const lockfilePath = ppath.join(project.cwd, project.configuration.get(`lockfileFilename`));
+    const lockfilePath = ppath.join(project.cwd, Filename.lockfile);
 
     // No need to enable it if the lockfile doesn't exist
     if (!xfs.existsSync(lockfilePath))
@@ -45,21 +47,22 @@ export class LegacyMigrationResolver implements Resolver {
     const parsed = parseSyml(content);
 
     // No need to enable it either if the lockfile is modern
-    if (Object.prototype.hasOwnProperty.call(parsed, `__metadata`))
+    if (Object.hasOwn(parsed, `__metadata`))
       return;
 
     const resolutions = this.resolutions = new Map();
 
     for (const key of Object.keys(parsed)) {
-      let descriptor = structUtils.tryParseDescriptor(key);
+      const parsedDescriptor = structUtils.tryParseDescriptor(key);
 
-      if (!descriptor) {
+      if (!parsedDescriptor) {
         report.reportWarning(MessageName.YARN_IMPORT_FAILED, `Failed to parse the string "${key}" into a proper descriptor`);
         continue;
       }
 
-      if (semver.validRange(descriptor.range))
-        descriptor = structUtils.makeDescriptor(descriptor, `npm:${descriptor.range}`);
+      const descriptor = semverUtils.validRange(parsedDescriptor.range)
+        ? structUtils.makeDescriptor(parsedDescriptor, `npm:${parsedDescriptor.range}`)
+        : parsedDescriptor;
 
       const {version, resolved} = (parsed as any)[key];
 
@@ -84,8 +87,18 @@ export class LegacyMigrationResolver implements Resolver {
         continue;
       }
 
-      const resolution = structUtils.makeLocator(descriptor, reference);
-      resolutions.set(descriptor.descriptorHash, resolution);
+      // If the range is a valid descriptor we're dealing with an alias ("foo": "npm:lodash@*")
+      // and need to make the locator from that instead of the original descriptor
+      let actualDescriptor = descriptor;
+      try {
+        const parsedRange = structUtils.parseRange(descriptor.range);
+        const potentialDescriptor = structUtils.tryParseDescriptor(parsedRange.selector, true);
+        if (potentialDescriptor) {
+          actualDescriptor = potentialDescriptor;
+        }
+      } catch { }
+
+      resolutions.set(descriptor.descriptorHash, structUtils.makeLocator(actualDescriptor, reference));
     }
   }
 
@@ -111,10 +124,10 @@ export class LegacyMigrationResolver implements Resolver {
   }
 
   getResolutionDependencies(descriptor: Descriptor, opts: MinimalResolveOptions) {
-    return [];
+    return {};
   }
 
-  async getCandidates(descriptor: Descriptor, dependencies: unknown, opts: ResolveOptions) {
+  async getCandidates(descriptor: Descriptor, dependencies: Record<string, Package>, opts: ResolveOptions) {
     if (!this.resolutions)
       throw new Error(`Assertion failed: The resolution store should have been setup`);
 
@@ -122,11 +135,19 @@ export class LegacyMigrationResolver implements Resolver {
     if (!resolution)
       throw new Error(`Assertion failed: The resolution should have been registered`);
 
-    return [resolution];
+    const importedDescriptor = structUtils.convertLocatorToDescriptor(resolution);
+    const normalizedDescriptor = opts.project.configuration.normalizeDependency(importedDescriptor);
+
+    return await this.resolver.getCandidates(normalizedDescriptor, dependencies, opts);
   }
 
-  async getSatisfying(descriptor: Descriptor, references: Array<string>, opts: ResolveOptions) {
-    return null;
+  async getSatisfying(descriptor: Descriptor, dependencies: Record<string, Package>, locators: Array<Locator>, opts: ResolveOptions) {
+    const [locator] = await this.getCandidates(descriptor, dependencies, opts);
+
+    return {
+      locators: locators.filter(candidate => candidate.locatorHash === locator.locatorHash),
+      sorted: false,
+    };
   }
 
   async resolve(locator: Locator, opts: ResolveOptions): Promise<never> {

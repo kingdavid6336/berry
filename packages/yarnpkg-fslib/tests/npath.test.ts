@@ -1,16 +1,19 @@
-import {npath} from '../sources/path';
-
 describe(`Portable paths`, () => {
   for (const platform of [`darwin`, `win32`]) {
     let realPlatform: string;
 
     describe(`Platform ${platform}`, () => {
+      let npath: typeof import('../sources/path').npath;
+
       beforeAll(() => {
         realPlatform = process.platform;
         Object.defineProperty(process, `platform`, {
           configurable: true,
           value: platform,
         });
+
+        jest.resetModules();
+        npath = require(`../sources/path`).npath;
       });
 
       afterAll(() => {
@@ -82,8 +85,20 @@ describe(`Portable paths`, () => {
             expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
           });
 
+          it(`should support forward slash UNC Windows paths (//[server]/[sharename]/)`, () => {
+            const inputPath = `//Server01/user/docs/Letter.txt`;
+            const outputPath = `/unc/Server01/user/docs/Letter.txt`;
+            expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
+          });
+
           it(`should support Long UNC Windows paths (\\\\?\\[server]\\[sharename]\\)`, () => {
             const inputPath = `\\\\?\\Server01\\user\\docs\\Letter.txt`;
+            const outputPath = `/unc/?/Server01/user/docs/Letter.txt`;
+            expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
+          });
+
+          it(`should support forward slash Long UNC Windows paths (//?/[server]/[sharename]/) `, () => {
+            const inputPath = `//?/Server01/user/docs/Letter.txt`;
             const outputPath = `/unc/?/Server01/user/docs/Letter.txt`;
             expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
           });
@@ -102,6 +117,12 @@ describe(`Portable paths`, () => {
 
           it(`should support Long UNC Windows paths with dot (\\\\.\\[physical_device]\\)`, () => {
             const inputPath = `\\\\.\\PhysicalDevice\\user\\docs\\Letter.txt`;
+            const outputPath = `/unc/.dot/PhysicalDevice/user/docs/Letter.txt`;
+            expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
+          });
+
+          it(`should support forward slash Long UNC Windows paths with dot (//./[physical_device]/)`, () => {
+            const inputPath = `//./PhysicalDevice/user/docs/Letter.txt`;
             const outputPath = `/unc/.dot/PhysicalDevice/user/docs/Letter.txt`;
             expect(npath.toPortablePath(inputPath)).toEqual(outputPath);
           });

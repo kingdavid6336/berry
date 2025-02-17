@@ -1,28 +1,28 @@
-import {FakeFS, PosixFS, npath, patchFs, PortablePath, NativePath} from '@yarnpkg/fslib';
-import fs                                                          from 'fs';
-import {Module}                                                    from 'module';
-import {URL, fileURLToPath}                                        from 'url';
+import {FakeFS, PosixFS, npath, patchFs, PortablePath, NativePath, VirtualFS} from '@yarnpkg/fslib';
+import fs                                                                     from 'fs';
+import {Module, isBuiltin}                                                    from 'module';
+import {fileURLToPath}                                                        from 'url';
 
-import {PnpApi}                                                    from '../types';
+import {PnpApi}                                                               from '../types';
 
-import {ErrorCode, makeError, getIssuerModule}                     from './internalTools';
-import {Manager}                                                   from './makeManager';
+import {ErrorCode, makeError, getIssuerModule}                                from './internalTools';
+import {Manager}                                                              from './makeManager';
+import * as nodeUtils                                                         from './nodeUtils';
 
 export type ApplyPatchOptions = {
-  fakeFs: FakeFS<PortablePath>,
-  manager: Manager,
+  fakeFs: FakeFS<PortablePath>;
+  manager: Manager;
 };
 
+declare global {
+  module NodeJS {
+    interface Process {
+      dlopen: (module: Object, filename: string, flags?: number) => void;
+    }
+  }
+}
+
 export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
-  // @ts-expect-error
-  const builtinModules = new Set(Module.builtinModules || Object.keys(process.binding(`natives`)));
-
-  /**
-   * The cache that will be used for all accesses occurring outside of a PnP context.
-   */
-
-  const defaultCache: NodeJS.NodeRequireCache = {};
-
   /**
    * Used to disable the resolution hooks (for when we want to fallback to the previous resolution - we then need
    * a way to "reset" the environment temporarily)
@@ -30,7 +30,6 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
 
   let enableNativeHooks = true;
 
-  // @ts-expect-error
   process.versions.pnp = String(pnpapi.VERSIONS.std);
 
   const moduleExports = require(`module`);
@@ -45,10 +44,11 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
       return null;
 
     const apiEntry = opts.manager.getApiEntry(apiPath, true);
-    return apiEntry.instance;
+    // Check if the path is ignored
+    return apiEntry.instance.findPackageLocator(lookupPath) ? apiEntry.instance : null;
   };
 
-  function getRequireStack(parent: Module | null | undefined) {
+  function getRequireStack(parent: NodeModule | null | undefined) {
     const requireStack = [];
 
     for (let cursor = parent; cursor; cursor = cursor.parent)
@@ -57,106 +57,18 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     return requireStack;
   }
 
-  // A small note: we don't replace the cache here (and instead use the native one). This is an effort to not
-  // break code similar to "delete require.cache[require.resolve(FOO)]", where FOO is a package located outside
-  // of the Yarn dependency tree. In this case, we defer the load to the native loader. If we were to replace the
-  // cache by our own, the native loader would populate its own cache, which wouldn't be exposed anymore, so the
-  // delete call would be broken.
-
   const originalModuleLoad = Module._load;
-
   Module._load = function(request: string, parent: NodeModule | null | undefined, isMain: boolean) {
-    if (!enableNativeHooks)
-      return originalModuleLoad.call(Module, request, parent, isMain);
+    // The 'pnpapi' name is reserved to return the PnP api currently in use by the program
+    if (request === `pnpapi`) {
+      const parentApiPath = opts.manager.getApiPathFromParent(parent);
 
-    // Builtins are managed by the regular Node loader
-
-    if (builtinModules.has(request)) {
-      try {
-        enableNativeHooks = false;
-        return originalModuleLoad.call(Module, request, parent, isMain);
-      } finally {
-        enableNativeHooks = true;
+      if (parentApiPath) {
+        return opts.manager.getApiEntry(parentApiPath, true).instance;
       }
     }
 
-    const parentApiPath = opts.manager.getApiPathFromParent(parent);
-
-    const parentApi = parentApiPath !== null
-      ? opts.manager.getApiEntry(parentApiPath, true).instance
-      : null;
-
-    // Requests that aren't covered by the PnP runtime goes through the
-    // parent `_load` implementation. This is required for VSCode, for example,
-    // which override `_load` to provide additional builtins to its extensions.
-
-    if (parentApi === null)
-      return originalModuleLoad(request, parent, isMain);
-
-    // The 'pnpapi' name is reserved to return the PnP api currently in use
-    // by the program
-
-    if (request === `pnpapi`)
-      return parentApi;
-
-    // Request `Module._resolveFilename` (ie. `resolveRequest`) to tell us
-    // which file we should load
-
-    const modulePath = Module._resolveFilename(request, parent, isMain);
-
-    // We check whether the module is owned by the dependency tree of the
-    // module that required it. If it isn't, then we need to create a new
-    // store and possibly load its sandboxed PnP runtime.
-
-    const isOwnedByRuntime = parentApi !== null
-      ? parentApi.findPackageLocator(modulePath) !== null
-      : false;
-
-    const moduleApiPath = isOwnedByRuntime
-      ? parentApiPath
-      : opts.manager.findApiPathFor(npath.dirname(modulePath));
-
-    const entry = moduleApiPath !== null
-      ? opts.manager.getApiEntry(moduleApiPath)
-      : {instance: null, cache: defaultCache};
-
-    // Check if the module has already been created for the given file
-
-    const cacheEntry = entry.cache[modulePath];
-    if (cacheEntry)
-      return cacheEntry.exports;
-
-    // Create a new module and store it into the cache
-
-    // @ts-expect-error
-    const module = new Module(modulePath, parent);
-    // @ts-expect-error
-    module.pnpApiPath = moduleApiPath;
-
-    entry.cache[modulePath] = module;
-
-    // The main module is exposed as global variable
-
-    if (isMain) {
-      process.mainModule = module;
-      module.id = `.`;
-    }
-
-    // Try to load the module, and remove it from the cache if it fails
-
-    let hasThrown = true;
-
-    try {
-    // @ts-expect-error
-      module.load(modulePath);
-      hasThrown = false;
-    } finally {
-      if (hasThrown) {
-        delete Module._cache[modulePath];
-      }
-    }
-
-    return module.exports;
+    return originalModuleLoad.call(Module, request, parent, isMain);
   };
 
   type IssuerSpec = {
@@ -174,6 +86,14 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
   }
 
   function getIssuerSpecsFromModule(module: NodeModule | null | undefined): Array<IssuerSpec> {
+    if (module && module.id !== `<repl>` && module.id !== `internal/preload` && !module.parent && !module.filename && module.paths.length > 0) {
+      return [{
+        apiPath: opts.manager.findApiPathFor(module.paths[0]),
+        path: module.paths[0],
+        module,
+      }];
+    }
+
     const issuer = getIssuerModule(module);
 
     if (issuer !== null) {
@@ -207,20 +127,14 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
   const originalModuleResolveFilename = Module._resolveFilename;
 
   Module._resolveFilename = function(request: string, parent: (NodeModule & {pnpApiPath?: PortablePath}) | null | undefined, isMain: boolean, options?: {[key: string]: any}) {
-    if (builtinModules.has(request))
+    if (isBuiltin(request))
       return request;
 
     if (!enableNativeHooks)
       return originalModuleResolveFilename.call(Module, request, parent, isMain, options);
 
     if (options && options.plugnplay === false) {
-      const {plugnplay, ...rest} = options;
-
-      // Workaround a bug present in some version of Node (now fixed)
-      // https://github.com/nodejs/node/pull/28078
-      const forwardedOptions = Object.keys(rest).length > 0
-        ? rest
-        : undefined;
+      const {plugnplay, ...forwardedOptions} = options;
 
       try {
         enableNativeHooks = false;
@@ -241,7 +155,7 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
       if (optionNames.size > 0) {
         throw makeError(
           ErrorCode.UNSUPPORTED,
-          `Some options passed to require() aren't supported by PnP yet (${Array.from(optionNames).join(`, `)})`
+          `Some options passed to require() aren't supported by PnP yet (${Array.from(optionNames).join(`, `)})`,
         );
       }
     }
@@ -262,8 +176,8 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
           : null;
 
       if (absoluteRequest !== null) {
-        const apiPath = parentDirectory === npath.dirname(absoluteRequest) && parent?.pnpApiPath
-          ? parent.pnpApiPath
+        const apiPath = parent && parentDirectory === npath.dirname(absoluteRequest)
+          ? opts.manager.getApiPathFromParent(parent)
           : opts.manager.findApiPathFor(absoluteRequest);
 
         if (apiPath !== null) {
@@ -328,26 +242,28 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     if (request === `pnpapi`)
       return false;
 
-    // Node sometimes call this function with an absolute path and a `null` set
-    // of paths. This would cause the resolution to fail. To avoid that, we
-    // fallback on the regular resolution. We only do this when `isMain` is
-    // true because the Node default resolution doesn't handle well in-zip
-    // paths, even absolute, so we try to use it as little as possible.
-    if (!enableNativeHooks || (isMain && npath.isAbsolute(request)))
+    if (!enableNativeHooks)
       return originalFindPath.call(Module, request, paths, isMain);
 
-    for (const path of paths || []) {
+    // https://github.com/nodejs/node/blob/e817ba70f56c4bfd5d4a68dce8b165142312e7b6/lib/internal/modules/cjs/loader.js#L490-L494
+    const isAbsolute = npath.isAbsolute(request);
+    if (isAbsolute)
+      paths = [``];
+    else if (!paths || paths.length === 0)
+      return false;
+
+    for (const path of paths) {
       let resolution: string | false;
 
       try {
-        const pnpApiPath = opts.manager.findApiPathFor(path);
+        const pnpApiPath = opts.manager.findApiPathFor(isAbsolute ? request : path);
         if (pnpApiPath !== null) {
           const api = opts.manager.getApiEntry(pnpApiPath, true).instance;
           resolution = api.resolveRequest(request, path) || false;
         } else {
           resolution = originalFindPath.call(Module, request, [path], isMain);
         }
-      } catch (error) {
+      } catch {
         continue;
       }
 
@@ -357,6 +273,58 @@ export function applyPatch(pnpapi: PnpApi, opts: ApplyPatchOptions) {
     }
 
     return false;
+  };
+
+  // @ts-expect-error - Missing types
+  if (!process.features.require_module) {
+    // https://github.com/nodejs/node/blob/3743406b0a44e13de491c8590386a964dbe327bb/lib/internal/modules/cjs/loader.js#L1110-L1154
+    const originalExtensionJSFunction = Module._extensions[`.js`] as (module: NodeModule, filename: string) => void;
+    Module._extensions[`.js`] = function (module: NodeModule, filename: string) {
+      if (filename.endsWith(`.js`)) {
+        const pkg = nodeUtils.readPackageScope(filename);
+        if (pkg && pkg.data?.type === `module`) {
+          const err = nodeUtils.ERR_REQUIRE_ESM(filename, module.parent?.filename);
+          Error.captureStackTrace(err);
+          throw err;
+        }
+      }
+
+      originalExtensionJSFunction.call(this, module, filename);
+    };
+  }
+
+  const originalDlopen = process.dlopen;
+  process.dlopen = function (...args) {
+    const [module, filename, ...rest] = args;
+    return originalDlopen.call(
+      this,
+      module,
+      npath.fromPortablePath(VirtualFS.resolveVirtual(npath.toPortablePath(filename))),
+      ...rest,
+    );
+  };
+
+  // When using the ESM loader Node.js prints either of the following warnings
+  //
+  // - ExperimentalWarning: --experimental-loader is an experimental feature. This feature could change at any time
+  // - ExperimentalWarning: Custom ESM Loaders is an experimental feature. This feature could change at any time
+  //
+  // Having this warning show up once is "fine" but it's also printed
+  // for each Worker that is created so it ends up spamming stderr.
+  // Since that doesn't provide any value we suppress the warning.
+  const originalEmit = process.emit;
+  // @ts-expect-error - TS complains about the return type of originalEmit.apply
+  process.emit = function (name, data: any, ...args) {
+    if (
+      name === `warning` &&
+      typeof data === `object` &&
+      data.name === `ExperimentalWarning` &&
+      (data.message.includes(`--experimental-loader`) ||
+        data.message.includes(`Custom ESM Loaders is an experimental feature`))
+    )
+      return false;
+
+    return originalEmit.apply(process, arguments as unknown as Parameters<typeof process.emit>);
   };
 
   patchFs(fs, new PosixFS(opts.fakeFs));

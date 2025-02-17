@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 
-import {getPluginConfiguration}                                                                                                                                                                            from '@yarnpkg/cli';
-import {Cache, Configuration, Project, Report, Workspace, structUtils, ProjectLookup, Manifest, Descriptor, HardDependencies, ThrowReport, StreamReport, MessageName, Ident, ResolveOptions, FetchOptions} from '@yarnpkg/core';
-import {PortablePath, npath, ppath, xfs}                                                                                                                                                                   from '@yarnpkg/fslib';
-import {Cli, Command, Builtins, Option}                                                                                                                                                                    from 'clipanion';
-import globby                                                                                                                                                                                              from 'globby';
-import micromatch                                                                                                                                                                                          from 'micromatch';
-import {Module}                                                                                                                                                                                            from 'module';
-import * as ts                                                                                                                                                                                             from 'typescript';
+import {getPluginConfiguration}                                                                                                                                                             from '@yarnpkg/cli';
+import {Cache, Configuration, Project, Report, Workspace, structUtils, Manifest, Descriptor, HardDependencies, ThrowReport, StreamReport, MessageName, Ident, ResolveOptions, FetchOptions} from '@yarnpkg/core';
+import {PortablePath, npath, ppath, xfs}                                                                                                                                                    from '@yarnpkg/fslib';
+import {Cli, Command, Builtins, Option}                                                                                                                                                     from 'clipanion';
+import globby                                                                                                                                                                               from 'globby';
+import micromatch                                                                                                                                                                           from 'micromatch';
+import {isBuiltin}                                                                                                                                                                          from 'module';
+import * as ts                                                                                                                                                                              from 'typescript';
 
-import * as ast                                                                                                                                                                                            from './ast';
-
-const BUILTINS = new Set([...Module.builtinModules || [], `pnpapi`]);
+import * as ast                                                                                                                                                                             from './ast';
 
 function probablyMinified(content: string) {
   if (content.length > 1024 * 1024)
@@ -70,7 +68,7 @@ function extractIdents(name: string) {
 }
 
 function isValidDependency(ident: Ident, {workspace}: {workspace: Workspace}) {
-  if (ident.identHash === workspace.locator.identHash)
+  if (ident.identHash === workspace.anchoredLocator.identHash)
     return true;
 
   if (workspace.manifest.hasDependency(ident))
@@ -80,7 +78,7 @@ function isValidDependency(ident: Ident, {workspace}: {workspace: Workspace}) {
 }
 
 function checkForUndeclaredDependency(workspace: Workspace, referenceNode: ts.Node, moduleName: string, {configuration, report}: {configuration: Configuration, report: Report}) {
-  if (BUILTINS.has(moduleName))
+  if (isBuiltin(moduleName) || moduleName === `pnpapi`)
     return;
 
   const idents = extractIdents(moduleName);
@@ -192,8 +190,8 @@ async function buildJsonNode(p: PortablePath, accesses: Array<string>) {
 
   const sourceFile = await ts.createSourceFile(
     npath.fromPortablePath(p),
-    `(${content})`,
-    ts.ScriptTarget.ES2015,
+    content,
+    ts.ScriptTarget.JSON,
     /*setParentNodes */ true,
   );
 
@@ -245,11 +243,11 @@ async function makeResolveFn(project: Project) {
   const checksums = project.storedChecksums;
   const yarnReport = new ThrowReport();
 
-  const fetchOptions: FetchOptions = {project, fetcher, cache, checksums, report: yarnReport, skipIntegrityCheck: true};
+  const fetchOptions: FetchOptions = {project, fetcher, cache, checksums, report: yarnReport, cacheOptions: {skipIntegrityCheck: true}};
   const resolveOptions: ResolveOptions = {...fetchOptions, resolver, fetchOptions};
 
   return async (descriptor: Descriptor) => {
-    const candidates = await resolver.getCandidates(descriptor, new Map(), resolveOptions);
+    const candidates = await resolver.getCandidates(descriptor, {}, resolveOptions);
     if (candidates.length === 0)
       return null;
 
@@ -296,6 +294,9 @@ async function processWorkspace(workspace: Workspace, {configuration, fileList, 
     if (scriptName.match(/^(pre|post)(?!(install|pack)$)/) && !scriptName.match(/^prettier/))
       report.reportWarning(MessageName.UNNAMED, `User scripts prefixed with "pre" or "post" (like "${scriptName}") will not be called in sequence anymore; prefer calling prologues and epilogues explicitly`);
 
+  if (Array.isArray(workspace.manifest.raw.bundleDependencies) || Array.isArray(workspace.manifest.raw.bundledDependencies))
+    report.reportWarning(MessageName.UNNAMED, `The bundleDependencies (or bundledDependencies) field is not supported anymore; prefer using a bundler`);
+
   for (const p of fileList) {
     const parsed = await parseFile(p);
 
@@ -326,14 +327,7 @@ class EntryCommand extends Command {
 
     const pluginConfiguration = getPluginConfiguration();
 
-    const findStandaloneWorkspace = async (manifestCwd: PortablePath) => {
-      const configuration = await Configuration.find(manifestCwd, pluginConfiguration, {strict: false, lookup: ProjectLookup.NONE});
-      const {workspace} = await Project.find(configuration, manifestCwd);
-
-      return workspace;
-    };
-
-    const findLockfileWorkspace = async (manifestCwd: PortablePath) => {
+    const findWorkspace = async (manifestCwd: PortablePath) => {
       const configuration = await Configuration.find(manifestCwd, pluginConfiguration, {strict: false});
       if (!configuration.projectCwd)
         return null;
@@ -344,18 +338,6 @@ class EntryCommand extends Command {
         return null;
 
       return workspace;
-    };
-
-    const findWorkspace = async (manifestCwd: PortablePath) => {
-      const lockfileWorkspace = await findLockfileWorkspace(manifestCwd);
-      if (lockfileWorkspace)
-        return lockfileWorkspace;
-
-      const standaloneWorkspace = await findStandaloneWorkspace(manifestCwd);
-      if (standaloneWorkspace)
-        return standaloneWorkspace;
-
-      return null;
     };
 
     const report = await StreamReport.start({

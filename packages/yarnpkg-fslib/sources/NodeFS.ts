@@ -1,11 +1,20 @@
-import fs, {BigIntStats, Stats}                                                                                                   from 'fs';
+import fs, {BigIntStats, Stats}                                                                                                                                 from 'fs';
 
-import {CreateReadStreamOptions, CreateWriteStreamOptions, Dir, StatWatcher, WatchFileCallback, WatchFileOptions, OpendirOptions} from './FakeFS';
-import {Dirent, SymlinkType}                                                                                                      from './FakeFS';
-import {BasePortableFakeFS, WriteFileOptions}                                                                                     from './FakeFS';
-import {MkdirOptions, RmdirOptions, WatchOptions, WatchCallback, Watcher}                                                         from './FakeFS';
-import {ENOSYS}                                                                                                                   from './errors';
-import {FSPath, PortablePath, Filename, ppath, npath, NativePath}                                                                 from './path';
+import {CreateReadStreamOptions, CreateWriteStreamOptions, Dir, StatWatcher, WatchFileCallback, WatchFileOptions, OpendirOptions, ReaddirOptions, DirentNoPath} from './FakeFS';
+import {Dirent, SymlinkType, StatSyncOptions, StatOptions}                                                                                                      from './FakeFS';
+import {BasePortableFakeFS, WriteFileOptions}                                                                                                                   from './FakeFS';
+import {MkdirOptions, RmdirOptions, RmOptions, WatchOptions, WatchCallback, Watcher}                                                                            from './FakeFS';
+import {FSPath, PortablePath, Filename, ppath, npath, NativePath}                                                                                               from './path';
+
+function direntToPortable(dirent: Dirent<NativePath>): Dirent<PortablePath> {
+  // We don't need to return a copy, we can just reuse the object the real fs returned
+  const portableDirent = dirent as Dirent<PortablePath>;
+
+  if (typeof dirent.path === `string`)
+    portableDirent.path = npath.toPortablePath(dirent.path);
+
+  return portableDirent;
+}
 
 export class NodeFS extends BasePortableFakeFS {
   private readonly realFs: typeof fs;
@@ -14,12 +23,6 @@ export class NodeFS extends BasePortableFakeFS {
     super();
 
     this.realFs = realFs;
-
-    // @ts-expect-error
-    if (typeof this.realFs.lutimes !== `undefined`) {
-      this.lutimesPromise = this.lutimesPromiseImpl;
-      this.lutimesSync = this.lutimesSyncImpl;
-    }
   }
 
   getExtractHint() {
@@ -45,23 +48,57 @@ export class NodeFS extends BasePortableFakeFS {
   }
 
   async opendirPromise(p: PortablePath, opts?: OpendirOptions): Promise<Dir<PortablePath>> {
-    return await new Promise<Dir<NativePath>>((resolve, reject) => {
+    return await new Promise<fs.Stats>((resolve, reject) => {
       if (typeof opts !== `undefined`) {
         this.realFs.opendir(npath.fromPortablePath(p), opts, this.makeCallback(resolve, reject) as any);
       } else {
         this.realFs.opendir(npath.fromPortablePath(p), this.makeCallback(resolve, reject) as any);
       }
     }).then(dir => {
-      return Object.defineProperty(dir, `path`, {value: p, configurable: true, writable: true});
+      // @ts-expect-error
+      //
+      // We need a way to tell TS that the values returned by the `read`
+      // methods are compatible with `Dir`, especially the `name` field.
+      //
+      // We also can't use `Object.assign` to set the because the `path`
+      // field to a Filename, because the property isn't writable, so
+      // we need to use defineProperty instead.
+      //
+      const dirWithFixedPath: Dir<PortablePath> = dir;
+
+      Object.defineProperty(dirWithFixedPath, `path`, {
+        value: p,
+        configurable: true,
+        writable: true,
+      });
+
+      return dirWithFixedPath;
     });
   }
 
-  opendirSync(p: PortablePath, opts?: OpendirOptions): Dir<PortablePath> {
-    const dir = typeof opts !== `undefined`
-      ? this.realFs.opendirSync(npath.fromPortablePath(p), opts) as Dir<NativePath>
-      : this.realFs.opendirSync(npath.fromPortablePath(p)) as Dir<NativePath>;
+  opendirSync(p: PortablePath, opts?: OpendirOptions) {
+    const dir: Omit<fs.Dir, `path`> = typeof opts !== `undefined`
+      ? this.realFs.opendirSync(npath.fromPortablePath(p), opts)
+      : this.realFs.opendirSync(npath.fromPortablePath(p));
 
-    return Object.defineProperty(dir, `path`, {value: p, configurable: true, writable: true});
+    // @ts-expect-error
+    //
+    // We need a way to tell TS that the values returned by the `read`
+    // methods are compatible with `Dir`, especially the `name` field.
+    //
+    // We also can't use `Object.assign` to set the because the `path`
+    // field to a Filename, because the property isn't writable, so
+    // we need to use defineProperty instead.
+    //
+    const dirWithFixedPath: Dir<PortablePath> = dir;
+
+    Object.defineProperty(dirWithFixedPath, `path`, {
+      value: p,
+      configurable: true,
+      writable: true,
+    });
+
+    return dirWithFixedPath;
   }
 
   async readPromise(fd: number, buffer: Buffer, offset: number = 0, length: number = 0, position: number | null = -1) {
@@ -154,11 +191,12 @@ export class NodeFS extends BasePortableFakeFS {
     return this.realFs.existsSync(npath.fromPortablePath(p));
   }
 
-  async statPromise(p: PortablePath): Promise<Stats>
-  async statPromise(p: PortablePath, opts: {bigint: true}): Promise<BigIntStats>
-  async statPromise(p: PortablePath, opts?: {bigint: boolean}): Promise<BigIntStats | Stats>
-  async statPromise(p: PortablePath, opts?: {bigint: boolean}) {
-    return await new Promise<Stats>((resolve, reject) => {
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L1042-L1059
+  async statPromise(p: PortablePath): Promise<Stats>;
+  async statPromise(p: PortablePath, opts: (StatOptions & {bigint?: false | undefined}) | undefined): Promise<Stats>;
+  async statPromise(p: PortablePath, opts: StatOptions & {bigint: true}): Promise<BigIntStats>;
+  async statPromise(p: PortablePath, opts?: StatOptions): Promise<Stats | BigIntStats> {
+    return await new Promise<BigIntStats | Stats>((resolve, reject) => {
       if (opts) {
         this.realFs.stat(npath.fromPortablePath(p), opts, this.makeCallback(resolve, reject));
       } else {
@@ -167,10 +205,14 @@ export class NodeFS extends BasePortableFakeFS {
     });
   }
 
-  statSync(p: PortablePath): Stats
-  statSync(p: PortablePath, opts: {bigint: true}): BigIntStats
-  statSync(p: PortablePath, opts?: {bigint: boolean}): BigIntStats | Stats
-  statSync(p: PortablePath, opts?: {bigint: boolean}) {
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L931-L967
+  statSync(p: PortablePath): Stats;
+  statSync(p: PortablePath, opts?: StatSyncOptions & {bigint?: false | undefined, throwIfNoEntry: false}): Stats | undefined;
+  statSync(p: PortablePath, opts: StatSyncOptions & {bigint: true, throwIfNoEntry: false}): BigIntStats | undefined;
+  statSync(p: PortablePath, opts?: StatSyncOptions & {bigint?: false | undefined}): Stats;
+  statSync(p: PortablePath, opts: StatSyncOptions & {bigint: true}): BigIntStats;
+  statSync(p: PortablePath, opts: StatSyncOptions & {bigint: boolean, throwIfNoEntry?: false | undefined}): Stats | BigIntStats;
+  statSync(p: PortablePath, opts?: StatSyncOptions): Stats | BigIntStats | undefined {
     if (opts) {
       return this.realFs.statSync(npath.fromPortablePath(p), opts);
     } else {
@@ -178,13 +220,12 @@ export class NodeFS extends BasePortableFakeFS {
     }
   }
 
-  async fstatPromise(fd: number): Promise<Stats>
-  async fstatPromise(fd: number, opts: {bigint: true}): Promise<BigIntStats>
-  async fstatPromise(fd: number, opts?: {bigint: boolean}): Promise<BigIntStats | Stats>
+  async fstatPromise(fd: number): Promise<Stats>;
+  async fstatPromise(fd: number, opts: {bigint: true}): Promise<BigIntStats>;
+  async fstatPromise(fd: number, opts?: {bigint: boolean}): Promise<BigIntStats | Stats>;
   async fstatPromise(fd: number, opts?: {bigint: boolean}) {
-    return await new Promise<Stats>((resolve, reject) => {
+    return await new Promise<BigIntStats | Stats>((resolve, reject) => {
       if (opts) {
-        // @ts-expect-error - The node typings doesn't know about the options
         this.realFs.fstat(fd, opts, this.makeCallback(resolve, reject));
       } else {
         this.realFs.fstat(fd, this.makeCallback(resolve, reject));
@@ -192,25 +233,24 @@ export class NodeFS extends BasePortableFakeFS {
     });
   }
 
-  fstatSync(fd: number): Stats
-  fstatSync(fd: number, opts: {bigint: true}): BigIntStats
-  fstatSync(fd: number, opts?: {bigint: boolean}): BigIntStats | Stats
+  fstatSync(fd: number): Stats;
+  fstatSync(fd: number, opts: {bigint: true}): BigIntStats;
+  fstatSync(fd: number, opts?: {bigint: boolean}): BigIntStats | Stats;
   fstatSync(fd: number, opts?: {bigint: boolean}) {
     if (opts) {
-      // @ts-expect-error - The node typings doesn't know about the options
       return this.realFs.fstatSync(fd, opts);
     } else {
       return this.realFs.fstatSync(fd);
     }
   }
 
-  async lstatPromise(p: PortablePath): Promise<Stats>
-  async lstatPromise(p: PortablePath, opts: {bigint: true}): Promise<BigIntStats>
-  async lstatPromise(p: PortablePath, opts?: { bigint: boolean }): Promise<BigIntStats | Stats>
-  async lstatPromise(p: PortablePath, opts?: { bigint: boolean }) {
-    return await new Promise<Stats>((resolve, reject) => {
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L1042-L1059
+  async lstatPromise(p: PortablePath): Promise<Stats>;
+  async lstatPromise(p: PortablePath, opts: (StatOptions & {bigint?: false | undefined}) | undefined): Promise<Stats>;
+  async lstatPromise(p: PortablePath, opts: StatOptions & {bigint: true}): Promise<BigIntStats>;
+  async lstatPromise(p: PortablePath, opts?: StatOptions): Promise<Stats | BigIntStats> {
+    return await new Promise<BigIntStats | Stats>((resolve, reject) => {
       if (opts) {
-        // @ts-expect-error - TS does not know this takes options
         this.realFs.lstat(npath.fromPortablePath(p), opts, this.makeCallback(resolve, reject));
       } else {
         this.realFs.lstat(npath.fromPortablePath(p), this.makeCallback(resolve, reject));
@@ -218,16 +258,29 @@ export class NodeFS extends BasePortableFakeFS {
     });
   }
 
+  // https://github.com/DefinitelyTyped/DefinitelyTyped/blob/51d793492d4c2e372b01257668dcd3afc58d7352/types/node/v16/fs.d.ts#L931-L967
   lstatSync(p: PortablePath): Stats;
-  lstatSync(p: PortablePath, opts: {bigint: true}): BigIntStats;
-  lstatSync(p: PortablePath, opts?: { bigint: boolean }): BigIntStats | Stats
-  lstatSync(p: PortablePath, opts?: { bigint: boolean }): BigIntStats | Stats {
+  lstatSync(p: PortablePath, opts?: StatSyncOptions & {bigint?: false | undefined, throwIfNoEntry: false}): Stats | undefined;
+  lstatSync(p: PortablePath, opts: StatSyncOptions & {bigint: true, throwIfNoEntry: false}): BigIntStats | undefined;
+  lstatSync(p: PortablePath, opts?: StatSyncOptions & {bigint?: false | undefined}): Stats;
+  lstatSync(p: PortablePath, opts: StatSyncOptions & {bigint: true}): BigIntStats;
+  lstatSync(p: PortablePath, opts: StatSyncOptions & {bigint: boolean, throwIfNoEntry?: false | undefined}): Stats | BigIntStats;
+  lstatSync(p: PortablePath, opts?: StatSyncOptions): Stats | BigIntStats | undefined {
     if (opts) {
-      // @ts-expect-error - TS does not know this takes options
       return this.realFs.lstatSync(npath.fromPortablePath(p), opts);
     } else {
       return this.realFs.lstatSync(npath.fromPortablePath(p));
     }
+  }
+
+  async fchmodPromise(fd: number, mask: number): Promise<void> {
+    return await new Promise<void>((resolve, reject) => {
+      this.realFs.fchmod(fd, mask, this.makeCallback(resolve, reject));
+    });
+  }
+
+  fchmodSync(fd: number, mask: number): void {
+    return this.realFs.fchmodSync(fd, mask);
   }
 
   async chmodPromise(p: PortablePath, mask: number) {
@@ -238,6 +291,16 @@ export class NodeFS extends BasePortableFakeFS {
 
   chmodSync(p: PortablePath, mask: number) {
     return this.realFs.chmodSync(npath.fromPortablePath(p), mask);
+  }
+
+  async fchownPromise(fd: number, uid: number, gid: number): Promise<void> {
+    return await new Promise<void>((resolve, reject) => {
+      this.realFs.fchown(fd, uid, gid, this.makeCallback(resolve, reject));
+    });
+  }
+
+  fchownSync(fd: number, uid: number, gid: number): void {
+    return this.realFs.fchownSync(fd, uid, gid);
   }
 
   async chownPromise(p: PortablePath, uid: number, gid: number) {
@@ -270,7 +333,7 @@ export class NodeFS extends BasePortableFakeFS {
     return this.realFs.copyFileSync(npath.fromPortablePath(sourceP), npath.fromPortablePath(destP), flags);
   }
 
-  async appendFilePromise(p: FSPath<PortablePath>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  async appendFilePromise(p: FSPath<PortablePath>, content: string | Uint8Array, opts?: WriteFileOptions) {
     return await new Promise<void>((resolve, reject) => {
       const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
       if (opts) {
@@ -281,7 +344,7 @@ export class NodeFS extends BasePortableFakeFS {
     });
   }
 
-  appendFileSync(p: PortablePath, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  appendFileSync(p: PortablePath, content: string | Uint8Array, opts?: WriteFileOptions) {
     const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
     if (opts) {
       this.realFs.appendFileSync(fsNativePath, content, opts);
@@ -290,7 +353,7 @@ export class NodeFS extends BasePortableFakeFS {
     }
   }
 
-  async writeFilePromise(p: FSPath<PortablePath>, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  async writeFilePromise(p: FSPath<PortablePath>, content: string | NodeJS.ArrayBufferView, opts?: WriteFileOptions) {
     return await new Promise<void>((resolve, reject) => {
       const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
       if (opts) {
@@ -301,7 +364,7 @@ export class NodeFS extends BasePortableFakeFS {
     });
   }
 
-  writeFileSync(p: PortablePath, content: string | Buffer | ArrayBuffer | DataView, opts?: WriteFileOptions) {
+  writeFileSync(p: PortablePath, content: string | NodeJS.ArrayBufferView, opts?: WriteFileOptions) {
     const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
     if (opts) {
       this.realFs.writeFileSync(fsNativePath, content, opts);
@@ -330,33 +393,23 @@ export class NodeFS extends BasePortableFakeFS {
     this.realFs.utimesSync(npath.fromPortablePath(p), atime, mtime);
   }
 
-  private async lutimesPromiseImpl(this: NodeFS, p: PortablePath, atime: Date | string | number, mtime: Date | string | number) {
-    // @ts-expect-error: Not yet in DefinitelyTyped
-    const lutimes = this.realFs.lutimes;
-    if (typeof lutimes === `undefined`)
-      throw ENOSYS(`unavailable Node binding`, `lutimes '${p}'`);
-
+  async lutimesPromise(p: PortablePath, atime: Date | string | number, mtime: Date | string | number) {
     return await new Promise<void>((resolve, reject) => {
-      lutimes.call(this.realFs, npath.fromPortablePath(p), atime, mtime, this.makeCallback(resolve, reject));
+      this.realFs.lutimes(npath.fromPortablePath(p), atime, mtime, this.makeCallback(resolve, reject));
     });
   }
 
-  private lutimesSyncImpl(this: NodeFS, p: PortablePath, atime: Date | string | number, mtime: Date | string | number) {
-    // @ts-expect-error: Not yet in DefinitelyTyped
-    const lutimesSync = this.realFs.lutimesSync;
-    if (typeof lutimesSync === `undefined`)
-      throw ENOSYS(`unavailable Node binding`, `lutimes '${p}'`);
-
-    lutimesSync.call(this.realFs, npath.fromPortablePath(p), atime, mtime);
+  lutimesSync(p: PortablePath, atime: Date | string | number, mtime: Date | string | number) {
+    this.realFs.lutimesSync(npath.fromPortablePath(p), atime, mtime);
   }
 
   async mkdirPromise(p: PortablePath, opts?: MkdirOptions) {
-    return await new Promise<void>((resolve, reject) => {
+    return await new Promise<string | undefined>((resolve, reject) => {
       this.realFs.mkdir(npath.fromPortablePath(p), opts, this.makeCallback(resolve, reject));
     });
   }
 
-  mkdirSync(p: PortablePath, opts?: MkdirOptions) {
+  mkdirSync(p: PortablePath, opts?: MkdirOptions): string | undefined {
     return this.realFs.mkdirSync(npath.fromPortablePath(p), opts);
   }
 
@@ -375,6 +428,21 @@ export class NodeFS extends BasePortableFakeFS {
     return this.realFs.rmdirSync(npath.fromPortablePath(p), opts);
   }
 
+  async rmPromise(p: PortablePath, opts?: RmOptions) {
+    return await new Promise<void>((resolve, reject) => {
+      // TODO: always pass opts when min node version is 12.10+
+      if (opts) {
+        this.realFs.rm(npath.fromPortablePath(p), opts, this.makeCallback(resolve, reject));
+      } else {
+        this.realFs.rm(npath.fromPortablePath(p), this.makeCallback(resolve, reject));
+      }
+    });
+  }
+
+  rmSync(p: PortablePath, opts?: RmOptions) {
+    return this.realFs.rmSync(npath.fromPortablePath(p), opts);
+  }
+
   async linkPromise(existingP: PortablePath, newP: PortablePath) {
     return await new Promise<void>((resolve, reject) => {
       this.realFs.link(npath.fromPortablePath(existingP), npath.fromPortablePath(newP), this.makeCallback(resolve, reject));
@@ -386,58 +454,84 @@ export class NodeFS extends BasePortableFakeFS {
   }
 
   async symlinkPromise(target: PortablePath, p: PortablePath, type?: SymlinkType) {
-    const symlinkType: SymlinkType = type || (target.endsWith(`/`) ? `dir` : `file`);
-
     return await new Promise<void>((resolve, reject) => {
-      this.realFs.symlink(npath.fromPortablePath(target.replace(/\/+$/, ``) as PortablePath), npath.fromPortablePath(p), symlinkType, this.makeCallback(resolve, reject));
+      this.realFs.symlink(npath.fromPortablePath(target.replace(/\/+$/, ``) as PortablePath), npath.fromPortablePath(p), type, this.makeCallback(resolve, reject));
     });
   }
 
   symlinkSync(target: PortablePath, p: PortablePath, type?: SymlinkType) {
-    const symlinkType: SymlinkType = type || (target.endsWith(`/`) ? `dir` : `file`);
-
-    return this.realFs.symlinkSync(npath.fromPortablePath(target.replace(/\/+$/, ``) as PortablePath), npath.fromPortablePath(p), symlinkType);
+    return this.realFs.symlinkSync(npath.fromPortablePath(target.replace(/\/+$/, ``) as PortablePath), npath.fromPortablePath(p), type);
   }
 
-  readFilePromise(p: FSPath<PortablePath>, encoding: 'utf8'): Promise<string>;
-  readFilePromise(p: FSPath<PortablePath>, encoding?: string): Promise<Buffer>;
-  async readFilePromise(p: FSPath<PortablePath>, encoding?: string) {
+  readFilePromise(p: FSPath<PortablePath>, encoding?: null): Promise<Buffer>;
+  readFilePromise(p: FSPath<PortablePath>, encoding: BufferEncoding): Promise<string>;
+  readFilePromise(p: FSPath<PortablePath>, encoding?: BufferEncoding | null): Promise<Buffer | string>;
+  async readFilePromise(p: FSPath<PortablePath>, encoding?: BufferEncoding | null) {
     return await new Promise<any>((resolve, reject) => {
       const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
       this.realFs.readFile(fsNativePath, encoding, this.makeCallback(resolve, reject));
     });
   }
 
-  readFileSync(p: FSPath<PortablePath>, encoding: 'utf8'): string;
-  readFileSync(p: FSPath<PortablePath>, encoding?: string): Buffer;
-  readFileSync(p: FSPath<PortablePath>, encoding?: string) {
+  readFileSync(p: FSPath<PortablePath>, encoding?: null): Buffer;
+  readFileSync(p: FSPath<PortablePath>, encoding: BufferEncoding): string;
+  readFileSync(p: FSPath<PortablePath>, encoding?: BufferEncoding | null): Buffer | string;
+  readFileSync(p: FSPath<PortablePath>, encoding?: BufferEncoding | null) {
     const fsNativePath = typeof p === `string` ? npath.fromPortablePath(p) : p;
     return this.realFs.readFileSync(fsNativePath, encoding);
   }
 
-  async readdirPromise(p: PortablePath): Promise<Array<Filename>>;
-  async readdirPromise(p: PortablePath, opts: {withFileTypes: false}): Promise<Array<Filename>>;
-  async readdirPromise(p: PortablePath, opts: {withFileTypes: true}): Promise<Array<Dirent>>;
-  async readdirPromise(p: PortablePath, opts: {withFileTypes: boolean}): Promise<Array<Filename> | Array<Dirent>>;
-  async readdirPromise(p: PortablePath, {withFileTypes}: {withFileTypes?: boolean} = {}): Promise<Array<string> | Array<Dirent>> {
-    return await new Promise<Array<Filename> | Array<Dirent>>((resolve, reject) => {
-      if (withFileTypes) {
-        this.realFs.readdir(npath.fromPortablePath(p), {withFileTypes: true}, this.makeCallback(resolve, reject) as any);
+  async readdirPromise(p: PortablePath, opts?: null): Promise<Array<Filename>>;
+  async readdirPromise(p: PortablePath, opts: {recursive?: false, withFileTypes: true}): Promise<Array<DirentNoPath>>;
+  async readdirPromise(p: PortablePath, opts: {recursive?: false, withFileTypes?: false}): Promise<Array<Filename>>;
+  async readdirPromise(p: PortablePath, opts: {recursive?: false, withFileTypes: boolean}): Promise<Array<DirentNoPath | Filename>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: true, withFileTypes: true}): Promise<Array<Dirent<PortablePath>>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: true, withFileTypes?: false}): Promise<Array<PortablePath>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: true, withFileTypes: boolean}): Promise<Array<Dirent<PortablePath> | PortablePath>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: boolean, withFileTypes: true}): Promise<Array<Dirent<PortablePath> | DirentNoPath>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: boolean, withFileTypes?: false}): Promise<Array<PortablePath>>;
+  async readdirPromise(p: PortablePath, opts: {recursive: boolean, withFileTypes: boolean}): Promise<Array<Dirent<PortablePath> | DirentNoPath | PortablePath>>;
+  async readdirPromise(p: PortablePath, opts?: ReaddirOptions | null): Promise<Array<Dirent<PortablePath> | DirentNoPath | PortablePath>> {
+    return await new Promise<any>((resolve, reject) => {
+      if (opts) {
+        if (opts.recursive && process.platform === `win32`) {
+          if (opts.withFileTypes) {
+            this.realFs.readdir(npath.fromPortablePath(p), opts as any, this.makeCallback<Array<Dirent<NativePath>>>(results => resolve(results.map(direntToPortable)), reject) as any);
+          } else {
+            this.realFs.readdir(npath.fromPortablePath(p), opts as any, this.makeCallback<Array<NativePath>>(results => resolve(results.map(npath.toPortablePath)), reject) as any);
+          }
+        } else {
+          this.realFs.readdir(npath.fromPortablePath(p), opts as any, this.makeCallback(resolve, reject) as any);
+        }
       } else {
-        this.realFs.readdir(npath.fromPortablePath(p), this.makeCallback(value => resolve(value as Array<Filename>), reject));
+        this.realFs.readdir(npath.fromPortablePath(p), this.makeCallback(resolve, reject));
       }
     });
   }
 
-  readdirSync(p: PortablePath): Array<Filename>;
-  readdirSync(p: PortablePath, opts: {withFileTypes: false}): Array<Filename>;
-  readdirSync(p: PortablePath, opts: {withFileTypes: true}): Array<Dirent>;
-  readdirSync(p: PortablePath, opts: {withFileTypes: boolean}): Array<Filename> | Array<Dirent>;
-  readdirSync(p: PortablePath, {withFileTypes}: {withFileTypes?: boolean} = {}): Array<string> | Array<Dirent> {
-    if (withFileTypes) {
-      return this.realFs.readdirSync(npath.fromPortablePath(p), {withFileTypes: true} as any);
+  readdirSync(p: PortablePath, opts?: null): Array<Filename>;
+  readdirSync(p: PortablePath, opts: {recursive?: false, withFileTypes: true}): Array<DirentNoPath>;
+  readdirSync(p: PortablePath, opts: {recursive?: false, withFileTypes?: false}): Array<Filename>;
+  readdirSync(p: PortablePath, opts: {recursive?: false, withFileTypes: boolean}): Array<DirentNoPath | Filename>;
+  readdirSync(p: PortablePath, opts: {recursive: true, withFileTypes: true}): Array<Dirent<PortablePath>>;
+  readdirSync(p: PortablePath, opts: {recursive: true, withFileTypes?: false}): Array<PortablePath>;
+  readdirSync(p: PortablePath, opts: {recursive: true, withFileTypes: boolean}): Array<Dirent<PortablePath> | PortablePath>;
+  readdirSync(p: PortablePath, opts: {recursive: boolean, withFileTypes: true}): Array<Dirent<PortablePath> | DirentNoPath>;
+  readdirSync(p: PortablePath, opts: {recursive: boolean, withFileTypes?: false}): Array<PortablePath>;
+  readdirSync(p: PortablePath, opts: {recursive: boolean, withFileTypes: boolean}): Array<Dirent<PortablePath> | DirentNoPath | PortablePath>;
+  readdirSync(p: PortablePath, opts?: ReaddirOptions | null): Array<Dirent<PortablePath> | DirentNoPath | PortablePath> {
+    if (opts) {
+      if (opts.recursive && process.platform === `win32`) {
+        if (opts.withFileTypes) {
+          return (this.realFs.readdirSync(npath.fromPortablePath(p), opts as any) as any as Array<Dirent<NativePath>>).map(direntToPortable);
+        } else {
+          return (this.realFs.readdirSync(npath.fromPortablePath(p), opts as any) as any as Array<NativePath>).map(npath.toPortablePath);
+        }
+      } else {
+        return this.realFs.readdirSync(npath.fromPortablePath(p), opts as any) as Array<PortablePath>;
+      }
     } else {
-      return this.realFs.readdirSync(npath.fromPortablePath(p)) as Array<Filename>;
+      return this.realFs.readdirSync(npath.fromPortablePath(p)) as Array<PortablePath>;
     }
   }
 
@@ -461,6 +555,16 @@ export class NodeFS extends BasePortableFakeFS {
 
   truncateSync(p: PortablePath, len?: number) {
     return this.realFs.truncateSync(npath.fromPortablePath(p), len);
+  }
+
+  async ftruncatePromise(fd: number, len?: number): Promise<void> {
+    return await new Promise<void>((resolve, reject) => {
+      this.realFs.ftruncate(fd, len, this.makeCallback(resolve, reject));
+    });
+  }
+
+  ftruncateSync(fd: number, len?: number): void {
+    return this.realFs.ftruncateSync(fd, len);
   }
 
   watch(p: PortablePath, cb?: WatchCallback): Watcher;

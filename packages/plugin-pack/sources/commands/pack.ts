@@ -1,6 +1,6 @@
 import {BaseCommand, WorkspaceRequiredError}                                                                        from '@yarnpkg/cli';
 import {Cache, Configuration, MessageName, Project, StreamReport, Workspace, formatUtils, structUtils, ThrowReport} from '@yarnpkg/core';
-import {Filename, npath, ppath, xfs}                                                                                from '@yarnpkg/fslib';
+import {npath, ppath, xfs}                                                                                          from '@yarnpkg/fslib';
 import {Command, Option, Usage}                                                                                     from 'clipanion';
 
 import * as packUtils                                                                                               from '../packUtils';
@@ -16,7 +16,7 @@ export default class PackCommand extends BaseCommand {
     details: `
       This command will turn the active workspace into a compressed archive suitable for publishing. The archive will by default be stored at the root of the workspace (\`package.tgz\`).
 
-      If the \`-o,---out\` is set the archive will be created at the specified path. The \`%s\` and \`%v\` variables can be used within the path and will be respectively replaced by the package name and version.
+      If the \`-o,--out\` is set the archive will be created at the specified path. The \`%s\` and \`%v\` variables can be used within the path and will be respectively replaced by the package name and version.
     `,
     examples: [[
       `Create an archive from the active workspace`,
@@ -71,7 +71,7 @@ export default class PackCommand extends BaseCommand {
 
     const target = typeof out !== `undefined`
       ? ppath.resolve(this.context.cwd, interpolateOutputName(out, {workspace}))
-      : ppath.resolve(workspace.cwd, `package.tgz` as Filename);
+      : ppath.resolve(workspace.cwd, `package.tgz`);
 
     const report = await StreamReport.start({
       configuration,
@@ -79,13 +79,13 @@ export default class PackCommand extends BaseCommand {
       json: this.json,
     }, async report => {
       await packUtils.prepareForPack(workspace, {report}, async () => {
-        report.reportJson({base: workspace.cwd});
+        report.reportJson({base: npath.fromPortablePath(workspace.cwd)});
 
         const files = await packUtils.genPackList(workspace);
 
         for (const file of files) {
-          report.reportInfo(null, file);
-          report.reportJson({location: file});
+          report.reportInfo(null, npath.fromPortablePath(file));
+          report.reportJson({location: npath.fromPortablePath(file)});
         }
 
         if (!this.dryRun) {
@@ -102,7 +102,7 @@ export default class PackCommand extends BaseCommand {
 
       if (!this.dryRun) {
         report.reportInfo(MessageName.UNNAMED, `Package archive generated in ${formatUtils.pretty(configuration, target, formatUtils.Type.PATH)}`);
-        report.reportJson({output: target});
+        report.reportJson({output: npath.fromPortablePath(target)});
       }
     });
 

@@ -1,5 +1,5 @@
 import {BaseCommand}                                                    from '@yarnpkg/cli';
-import {structUtils, hashUtils}                                         from '@yarnpkg/core';
+import {structUtils, hashUtils, Report, CommandContext, YarnVersion}    from '@yarnpkg/core';
 import {Configuration, MessageName, Project, ReportError, StreamReport} from '@yarnpkg/core';
 import {PortablePath, npath, ppath, xfs, Filename}                      from '@yarnpkg/fslib';
 import {Command, Option, Usage}                                         from 'clipanion';
@@ -14,7 +14,7 @@ const buildWorkflow = ({pluginName, noMinify}: {noMinify: boolean, pluginName: s
 ];
 
 // eslint-disable-next-line arca/no-default-export
-export default class PluginDlSourcesCommand extends BaseCommand {
+export default class PluginImportSourcesCommand extends BaseCommand {
   static paths = [
     [`plugin`, `import`, `from`, `sources`],
   ];
@@ -63,7 +63,7 @@ export default class PluginDlSourcesCommand extends BaseCommand {
 
     const target = typeof this.installPath !== `undefined`
       ? ppath.resolve(this.context.cwd, npath.toPortablePath(this.installPath))
-      : ppath.resolve(npath.toPortablePath(tmpdir()), `yarnpkg-sources` as Filename, hashUtils.makeHash(this.repository).slice(0, 6) as Filename);
+      : ppath.resolve(npath.toPortablePath(tmpdir()), `yarnpkg-sources`, hashUtils.makeHash(this.repository).slice(0, 6) as Filename);
 
     const report = await StreamReport.start({
       configuration,
@@ -73,33 +73,45 @@ export default class PluginDlSourcesCommand extends BaseCommand {
 
       const ident = structUtils.parseIdent(this.name.replace(/^((@yarnpkg\/)?plugin-)?/, `@yarnpkg/plugin-`));
       const identStr = structUtils.stringifyIdent(ident);
-      const data = await getAvailablePlugins(configuration);
+      const data = await getAvailablePlugins(configuration, YarnVersion);
 
-      if (!Object.prototype.hasOwnProperty.call(data, identStr))
+      if (!Object.hasOwn(data, identStr))
         throw new ReportError(MessageName.PLUGIN_NAME_NOT_FOUND, `Couldn't find a plugin named "${identStr}" on the remote registry. Note that only the plugins referenced on our website (https://github.com/yarnpkg/berry/blob/master/plugins.yml) can be built and imported from sources.`);
 
       const pluginSpec = identStr;
-      const pluginName = pluginSpec.replace(/@yarnpkg\//, ``);
 
       await prepareRepo(this, {configuration, report, target});
 
-      report.reportSeparator();
-      report.reportInfo(MessageName.UNNAMED, `Building a fresh ${pluginName}`);
-      report.reportSeparator();
-
-      await runWorkflow(buildWorkflow({
-        pluginName,
-        noMinify: this.noMinify,
-      }, target), {configuration, context: this.context, target});
-
-      report.reportSeparator();
-
-      const pluginPath = ppath.resolve(target, `packages/${pluginName}/bundles/${pluginSpec}.js` as PortablePath);
-      const pluginBuffer = await xfs.readFilePromise(pluginPath);
-
-      await savePlugin(pluginSpec, pluginBuffer, {project, report});
+      await buildAndSavePlugin(pluginSpec, this, {project, report, target});
     });
 
     return report.exitCode();
   }
+}
+
+export type BuildAndSavePluginsSpec = {
+  context: CommandContext;
+  noMinify: boolean;
+};
+
+export async function buildAndSavePlugin(pluginSpec: string, {context, noMinify}: BuildAndSavePluginsSpec, {project, report, target}: {project: Project, report: Report, target: PortablePath}) {
+  const pluginName = pluginSpec.replace(/@yarnpkg\//, ``);
+
+  const {configuration} = project;
+
+  report.reportSeparator();
+  report.reportInfo(MessageName.UNNAMED, `Building a fresh ${pluginName}`);
+  report.reportSeparator();
+
+  await runWorkflow(buildWorkflow({
+    pluginName,
+    noMinify,
+  }, target), {configuration, context, target});
+
+  report.reportSeparator();
+
+  const pluginPath = ppath.resolve(target, `packages/${pluginName}/bundles/${pluginSpec}.js`);
+  const pluginBuffer = await xfs.readFilePromise(pluginPath);
+
+  await savePlugin(pluginSpec, pluginBuffer, {project, report});
 }

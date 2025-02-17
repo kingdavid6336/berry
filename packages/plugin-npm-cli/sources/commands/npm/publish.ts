@@ -16,7 +16,7 @@ export default class NpmPublishCommand extends BaseCommand {
     details: `
       This command will pack the active workspace into a fresh archive and upload it to the npm registry.
 
-      The package will by default be attached to the \`latest\` tag on the registry, but this behavior can be overriden by using the \`--tag\` option.
+      The package will by default be attached to the \`latest\` tag on the registry, but this behavior can be overridden by using the \`--tag\` option.
 
       Note that for legacy reasons scoped packages are by default published with an access set to \`restricted\` (aka "private packages"). This requires you to register for a paid npm plan. In case you simply wish to publish a public scoped package to the registry (for free), just add the \`--access public\` flag. This behavior can be enabled by default through the \`npmPublishAccess\` settings.
     `,
@@ -36,6 +36,10 @@ export default class NpmPublishCommand extends BaseCommand {
 
   tolerateRepublish = Option.Boolean(`--tolerate-republish`, false, {
     description: `Warn and exit when republishing an already existing version of a package`,
+  });
+
+  otp = Option.String(`--otp`, {
+    description: `The OTP token to use with the command`,
   });
 
   async execute() {
@@ -72,18 +76,16 @@ export default class NpmPublishCommand extends BaseCommand {
             jsonResponse: true,
           });
 
-          if (!Object.prototype.hasOwnProperty.call(registryData, `versions`))
+          if (!Object.hasOwn(registryData, `versions`))
             throw new ReportError(MessageName.REMOTE_INVALID, `Registry returned invalid data for - missing "versions" field`);
 
-          if (Object.prototype.hasOwnProperty.call(registryData.versions, version)) {
+          if (Object.hasOwn(registryData.versions, version)) {
             report.reportWarning(MessageName.UNNAMED, `Registry already knows about version ${version}; skipping.`);
             return;
           }
-        } catch (error) {
-          if (error.name !== `HTTPError`) {
-            throw error;
-          } else if (error.response.statusCode !== 404) {
-            throw new ReportError(MessageName.NETWORK_ERROR, `The remote server answered with HTTP ${error.response.statusCode} ${error.response.statusMessage}`);
+        } catch (err) {
+          if (err.originalError?.response?.statusCode !== 404) {
+            throw err;
           }
         }
       }
@@ -99,35 +101,24 @@ export default class NpmPublishCommand extends BaseCommand {
         const pack = await packUtils.genPackStream(workspace, files);
         const buffer = await miscUtils.bufferStream(pack);
 
+        const gitHead = await npmPublishUtils.getGitHead(workspace.cwd);
         const body = await npmPublishUtils.makePublishBody(workspace, buffer, {
           access: this.access,
           tag: this.tag,
           registry,
+          gitHead,
         });
 
-        try {
-          await npmHttpUtils.put(npmHttpUtils.getIdentUrl(ident), body, {
-            configuration,
-            registry,
-            ident,
-            jsonResponse: true,
-          });
-        } catch (error) {
-          if (error.name !== `HTTPError`) {
-            throw error;
-          } else {
-            const message = error.response.body && error.response.body.error
-              ? error.response.body.error
-              : `The remote server answered with HTTP ${error.response.statusCode} ${error.response.statusMessage}`;
-
-            report.reportError(MessageName.NETWORK_ERROR, message);
-          }
-        }
+        await npmHttpUtils.put(npmHttpUtils.getIdentUrl(ident), body, {
+          configuration,
+          registry,
+          ident,
+          otp: this.otp,
+          jsonResponse: true,
+        });
       });
 
-      if (!report.hasErrors()) {
-        report.reportInfo(MessageName.UNNAMED, `Package archive published`);
-      }
+      report.reportInfo(MessageName.UNNAMED, `Package archive published`);
     });
 
     return report.exitCode();

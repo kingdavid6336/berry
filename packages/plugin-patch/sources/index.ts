@@ -3,17 +3,26 @@ import {PortablePath}                  from '@yarnpkg/fslib';
 
 import {PatchFetcher}                  from './PatchFetcher';
 import {PatchResolver}                 from './PatchResolver';
-import PatchCommit                     from './commands/patchCommit';
-import Patch                           from './commands/patch';
+import PatchCommitCommand              from './commands/patchCommit';
+import PatchCommand                    from './commands/patch';
 import * as patchUtils                 from './patchUtils';
 
+export {PatchFetcher};
+export {PatchResolver};
+export {PatchCommitCommand};
+export {PatchCommand};
 export {patchUtils};
 
 export interface Hooks {
+  /**
+   * Registers a builtin patch that can be referenced using the dedicated
+   * syntax: `patch:builtin<name>`. This is for instance how the TypeScript
+   * patch is automatically registered.
+   */
   getBuiltinPatch?: (
     project: Project,
     name: string,
-  ) => Promise<string | null | void>,
+  ) => Promise<string | null | void>;
 }
 
 declare module '@yarnpkg/core' {
@@ -37,8 +46,8 @@ const plugin: Plugin = {
     },
   },
   commands: [
-    PatchCommit,
-    Patch,
+    PatchCommitCommand,
+    PatchCommand,
   ],
   fetchers: [
     PatchFetcher,

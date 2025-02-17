@@ -1,9 +1,11 @@
 import {Configuration, Manifest, Ident} from '@yarnpkg/core';
 
 export enum RegistryType {
+  AUDIT_REGISTRY = `npmAuditRegistry`,
   FETCH_REGISTRY = `npmRegistryServer`,
   PUBLISH_REGISTRY = `npmPublishRegistry`,
 }
+
 
 export interface MapLike {
   get(key: string): any;
@@ -13,8 +15,12 @@ export function normalizeRegistry(registry: string) {
   return registry.replace(/\/$/, ``);
 }
 
+export function getAuditRegistry({configuration}: {configuration: Configuration}) {
+  return getDefaultRegistry({configuration, type: RegistryType.AUDIT_REGISTRY});
+}
+
 export function getPublishRegistry(manifest: Manifest, {configuration}: {configuration: Configuration}) {
-  if (manifest.publishConfig && manifest.publishConfig.registry)
+  if (manifest.publishConfig?.registry)
     return normalizeRegistry(manifest.publishConfig.registry);
 
   if (manifest.name)
@@ -45,12 +51,13 @@ export function getDefaultRegistry({configuration, type = RegistryType.FETCH_REG
 
 export function getRegistryConfiguration(registry: string, {configuration}: {configuration: Configuration}): MapLike | null {
   const registryConfigurations = configuration.get(`npmRegistries`);
+  const normalizedRegistry = normalizeRegistry(registry);
 
-  const exactEntry = registryConfigurations.get(registry);
+  const exactEntry = registryConfigurations.get(normalizedRegistry);
   if (typeof exactEntry !== `undefined`)
     return exactEntry;
 
-  const noProtocolEntry = registryConfigurations.get(registry.replace(/^[a-z]+:/, ``));
+  const noProtocolEntry = registryConfigurations.get(normalizedRegistry.replace(/^[a-z]+:/, ``));
   if (typeof noProtocolEntry !== `undefined`)
     return noProtocolEntry;
 

@@ -31,6 +31,9 @@ export enum MessageName {
   CONSTRAINTS_INVALID_DEPENDENCY = 26,
   CANT_SUGGEST_RESOLUTIONS = 27,
   FROZEN_LOCKFILE_EXCEPTION = 28,
+  /**
+   * @deprecated Virtuals aren't implemented using symlinks anymore. Context: https://github.com/yarnpkg/berry/pull/43#discussion_r269578031
+   */
   CROSS_DRIVE_VIRTUAL_LOCAL = 29,
   FETCH_FAILED = 30,
   DANGEROUS_NODE_MODULES = 31,
@@ -64,7 +67,13 @@ export enum MessageName {
   INVALID_RANGE_PEER_DEPENDENCY = 59,
   INCOMPATIBLE_PEER_DEPENDENCY = 60,
   DEPRECATED_PACKAGE = 61,
+  /**
+   * @deprecated Use {@link INCOMPATIBLE_ARCHITECTURE}
+   */
   INCOMPATIBLE_OS = 62,
+  /**
+   * @deprecated Use {@link INCOMPATIBLE_ARCHITECTURE}
+   */
   INCOMPATIBLE_CPU = 63,
   FROZEN_ARTIFACT_EXCEPTION = 64,
   TELEMETRY_NOTICE = 65,
@@ -73,8 +82,36 @@ export enum MessageName {
   UNUSED_PACKAGE_EXTENSION = 68,
   REDUNDANT_PACKAGE_EXTENSION = 69,
   AUTO_NM_SUCCESS = 70,
+  NM_CANT_INSTALL_EXTERNAL_SOFT_LINK = 71,
+  NM_PRESERVE_SYMLINKS_REQUIRED = 72,
+  UPDATE_LOCKFILE_ONLY_SKIP_LINK = 73,
+  NM_HARDLINKS_MODE_DOWNGRADED = 74,
+  PROLOG_INSTANTIATION_ERROR = 75,
+  INCOMPATIBLE_ARCHITECTURE = 76,
+  GHOST_ARCHITECTURE = 77,
+  RESOLUTION_MISMATCH = 78,
+  PROLOG_LIMIT_EXCEEDED = 79,
+  NETWORK_DISABLED = 80,
+  NETWORK_UNSAFE_HTTP = 81,
+  RESOLUTION_FAILED = 82,
+  AUTOMERGE_GIT_ERROR = 83,
+  CONSTRAINTS_CHECK_FAILED = 84,
+  UPDATED_RESOLUTION_RECORD = 85,
+  EXPLAIN_PEER_DEPENDENCIES_CTA = 86,
+  MIGRATION_SUCCESS = 87,
+  VERSION_NOTICE = 88,
+  TIPS_NOTICE = 89,
+  OFFLINE_MODE_ENABLED = 90,
 }
 
 export function stringifyMessageName(name: MessageName | number): string {
   return `YN${name.toString(10).padStart(4, `0`)}`;
+}
+
+export function parseMessageName(messageName: string): MessageName {
+  const parsed = Number(messageName.slice(2));
+  if (typeof MessageName[parsed] === `undefined`)
+    throw new Error(`Unknown message name: "${messageName}"`);
+
+  return parsed;
 }

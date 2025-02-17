@@ -7,32 +7,29 @@ on:
     - master
   pull_request:
     paths:
+    - .github/actions/prepare/action.yml
     - .github/workflows/e2e-storybook-workflow.yml
     - scripts/e2e-setup-ci.sh
 
 name: 'E2E Storybook'
+env:
+  STORYBOOK_DISABLE_TELEMETRY: 1
 jobs:
   chore:
     name: 'Validating Storybook (with a React app)'
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@v4
 
-    - name: 'Install Node'
-      uses: actions/setup-node@master
-      with:
-        node-version: 14.x
-
-    - name: 'Build the standard bundle'
-      run: |
-        node ./scripts/run-yarn.js build:cli
+    - uses: ./.github/actions/prepare
 
     - name: 'Running the integration test'
       run: |
         source scripts/e2e-setup-ci.sh
-        yarn dlx create-react-app my-cra && cd my-cra
-        yarn add -D eslint-config-react-app
-        yarn dlx -p @storybook/cli@next sb init --yes
-        yarn build-storybook
+        yarn create react-app my-cra && cd my-cra
 
+        yarn add @babel/preset-env
+
+        yarn dlx storybook@latest init --yes --no-dev
+        yarn build-storybook

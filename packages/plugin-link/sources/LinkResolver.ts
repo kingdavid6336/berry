@@ -1,10 +1,10 @@
-import {Resolver, ResolveOptions, MinimalResolveOptions} from '@yarnpkg/core';
-import {Descriptor, Locator, Manifest, Package}          from '@yarnpkg/core';
-import {LinkType}                                        from '@yarnpkg/core';
-import {miscUtils, structUtils}                          from '@yarnpkg/core';
-import {npath}                                           from '@yarnpkg/fslib';
+import {Resolver, ResolveOptions, MinimalResolveOptions, Package} from '@yarnpkg/core';
+import {Descriptor, Locator}                                      from '@yarnpkg/core';
+import {LinkType}                                                 from '@yarnpkg/core';
+import {structUtils}                                              from '@yarnpkg/core';
+import {npath}                                                    from '@yarnpkg/fslib';
 
-import {LINK_PROTOCOL}                                   from './constants';
+import {LINK_PROTOCOL}                                            from './constants';
 
 export class LinkResolver implements Resolver {
   supportsDescriptor(descriptor: Descriptor, opts: MinimalResolveOptions) {
@@ -32,7 +32,7 @@ export class LinkResolver implements Resolver {
   }
 
   getResolutionDependencies(descriptor: Descriptor, opts: MinimalResolveOptions) {
-    return [];
+    return {};
   }
 
   async getCandidates(descriptor: Descriptor, dependencies: unknown, opts: ResolveOptions) {
@@ -41,35 +41,33 @@ export class LinkResolver implements Resolver {
     return [structUtils.makeLocator(descriptor, `${LINK_PROTOCOL}${npath.toPortablePath(path)}`)];
   }
 
-  async getSatisfying(descriptor: Descriptor, references: Array<string>, opts: ResolveOptions) {
-    return null;
+  async getSatisfying(descriptor: Descriptor, dependencies: Record<string, Package>, locators: Array<Locator>, opts: ResolveOptions) {
+    const [locator] = await this.getCandidates(descriptor, dependencies, opts);
+
+    return {
+      locators: locators.filter(candidate => candidate.locatorHash === locator.locatorHash),
+      sorted: false,
+    };
   }
 
-  async resolve(locator: Locator, opts: ResolveOptions): Promise<Package> {
-    if (!opts.fetchOptions)
-      throw new Error(`Assertion failed: This resolver cannot be used unless a fetcher is configured`);
-
-    const packageFetch = await opts.fetchOptions.fetcher.fetch(locator, opts.fetchOptions);
-
-    const manifest = await miscUtils.releaseAfterUseAsync(async () => {
-      return await Manifest.find(packageFetch.prefixPath, {baseFs: packageFetch.packageFs});
-    }, packageFetch.releaseFs);
-
+  async resolve(locator: Locator, opts: ResolveOptions) {
     return {
       ...locator,
 
-      version: manifest.version || `0.0.0`,
+      version: `0.0.0`,
 
       languageName: opts.project.configuration.get(`defaultLanguageName`),
       linkType: LinkType.SOFT,
 
-      dependencies: new Map([...manifest.dependencies]),
-      peerDependencies: manifest.peerDependencies,
+      conditions: null,
 
-      dependenciesMeta: manifest.dependenciesMeta,
-      peerDependenciesMeta: manifest.peerDependenciesMeta,
+      dependencies: new Map(),
+      peerDependencies: new Map(),
 
-      bin: manifest.bin,
+      dependenciesMeta: new Map(),
+      peerDependenciesMeta: new Map(),
+
+      bin: new Map(),
     };
   }
 }

@@ -1,8 +1,8 @@
-import {BaseCommand, WorkspaceRequiredError}     from '@yarnpkg/cli';
-import {Configuration, Project}                  from '@yarnpkg/core';
-import {scriptUtils, structUtils}                from '@yarnpkg/core';
-import {NativePath, Filename, ppath, xfs, npath} from '@yarnpkg/fslib';
-import {Command, Option, Usage}                  from 'clipanion';
+import {BaseCommand, WorkspaceRequiredError}                                  from '@yarnpkg/cli';
+import {Configuration, MessageName, miscUtils, Project, stringifyMessageName} from '@yarnpkg/core';
+import {scriptUtils, structUtils, formatUtils}                                from '@yarnpkg/core';
+import {NativePath, ppath, xfs, npath}                                        from '@yarnpkg/fslib';
+import {Command, Option, Usage}                                               from 'clipanion';
 
 // eslint-disable-next-line arca/no-default-export
 export default class DlxCommand extends BaseCommand {
@@ -22,11 +22,14 @@ export default class DlxCommand extends BaseCommand {
     examples: [[
       `Use create-react-app to create a new React app`,
       `yarn dlx create-react-app ./my-app`,
+    ], [
+      `Install multiple packages for a single command`,
+      `yarn dlx -p typescript -p ts-node ts-node --transpile-only -e "console.log('hello!')"`,
     ]],
   });
 
-  pkg = Option.String(`-p,--package`, {
-    description: `The package to run the provided command from`,
+  packages = Option.Array(`-p,--package`, {
+    description: `The package(s) to install before running the command`,
   });
 
   quiet = Option.Boolean(`-q,--quiet`, false, {
@@ -41,28 +44,42 @@ export default class DlxCommand extends BaseCommand {
     Configuration.telemetry = null;
 
     return await xfs.mktempPromise(async baseDir => {
-      const tmpDir = ppath.join(baseDir, `dlx-${process.pid}` as Filename);
+      const tmpDir = ppath.join(baseDir, `dlx-${process.pid}`);
       await xfs.mkdirPromise(tmpDir);
 
-      await xfs.writeFilePromise(ppath.join(tmpDir, `package.json` as Filename), `{}\n`);
-      await xfs.writeFilePromise(ppath.join(tmpDir, `yarn.lock` as Filename), ``);
+      await xfs.writeFilePromise(ppath.join(tmpDir, `package.json`), `{}\n`);
+      await xfs.writeFilePromise(ppath.join(tmpDir, `yarn.lock`), ``);
 
-      const targetYarnrc = ppath.join(tmpDir, `.yarnrc.yml` as Filename);
-      const projectCwd = await Configuration.findProjectCwd(this.context.cwd, Filename.lockfile);
+      const targetYarnrc = ppath.join(tmpDir, `.yarnrc.yml`);
+      const projectCwd = await Configuration.findProjectCwd(this.context.cwd);
+
+      // We set enableGlobalCache to true for dlx calls to speed it up but only if the
+      // project it's run in has enableGlobalCache set to false, otherwise we risk running into
+      // `Unable to locate pnpapi ... is controlled by multiple pnpapi instances` errors when
+      // running something like `yarn dlx sb init`
+      const enableGlobalCache = !(await Configuration.find(this.context.cwd, null, {strict: false})).get(`enableGlobalCache`);
+
+      const dlxConfiguration = {
+        enableGlobalCache,
+        enableTelemetry: false,
+        logFilters: [
+          // Don't warn if package extensions are unused in dlx projects
+          {
+            code: stringifyMessageName(MessageName.UNUSED_PACKAGE_EXTENSION),
+            level: formatUtils.LogLevel.Discard,
+          },
+        ],
+      };
 
       const sourceYarnrc = projectCwd !== null
-        ? ppath.join(projectCwd, `.yarnrc.yml` as Filename)
+        ? ppath.join(projectCwd, `.yarnrc.yml`)
         : null;
 
       if (sourceYarnrc !== null && xfs.existsSync(sourceYarnrc)) {
         await xfs.copyFilePromise(sourceYarnrc, targetYarnrc);
 
         await Configuration.updateConfiguration(tmpDir, current => {
-          const nextConfiguration: {[key: string]: unknown} = {
-            ...current,
-            enableGlobalCache: true,
-            enableTelemetry: false,
-          };
+          const nextConfiguration = miscUtils.toMerged(current, dlxConfiguration);
 
           if (Array.isArray(current.plugins)) {
             nextConfiguration.plugins = current.plugins.map((plugin: any) => {
@@ -85,16 +102,14 @@ export default class DlxCommand extends BaseCommand {
           return nextConfiguration;
         });
       } else {
-        await xfs.writeFilePromise(targetYarnrc, `enableGlobalCache: true\nenableTelemetry: false\n`);
+        await xfs.writeJsonPromise(targetYarnrc, dlxConfiguration);
       }
 
-      const pkgs = typeof this.pkg !== `undefined`
-        ? [this.pkg]
-        : [this.command];
+      const pkgs = this.packages ?? [this.command];
 
-      const command = structUtils.parseDescriptor(this.command).name;
+      let command = structUtils.parseDescriptor(this.command).name;
 
-      const addExitCode = await this.cli.run([`add`, `--`, ...pkgs], {cwd: tmpDir, quiet: this.quiet});
+      const addExitCode = await this.cli.run([`add`, `--fixed`, `--`, ...pkgs], {cwd: tmpDir, quiet: this.quiet});
       if (addExitCode !== 0)
         return addExitCode;
 
@@ -109,7 +124,13 @@ export default class DlxCommand extends BaseCommand {
 
       await project.restoreInstallState();
 
+      const binaries = await scriptUtils.getWorkspaceAccessibleBinaries(workspace);
+
+      if (binaries.has(command) === false && binaries.size === 1 && typeof this.packages === `undefined`)
+        command = Array.from(binaries)[0][0];
+
       return await scriptUtils.executeWorkspaceAccessibleBinary(workspace, command, this.args, {
+        packageAccessibleBinaries: binaries,
         cwd: this.context.cwd,
         stdin: this.context.stdin,
         stdout: this.context.stdout,

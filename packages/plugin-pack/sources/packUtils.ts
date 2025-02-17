@@ -1,11 +1,11 @@
-import {Report, Workspace, scriptUtils, tgzUtils}                  from '@yarnpkg/core';
-import {FakeFS, JailFS, xfs, PortablePath, ppath, Filename, npath} from '@yarnpkg/fslib';
-import {Hooks as StageHooks}                                       from '@yarnpkg/plugin-stage';
-import mm                                                          from 'micromatch';
-import tar                                                         from 'tar-stream';
-import {createGzip}                                                from 'zlib';
+import {Manifest, Report, Workspace, scriptUtils}                             from '@yarnpkg/core';
+import {FakeFS, JailFS, xfs, PortablePath, ppath, Filename, npath, constants} from '@yarnpkg/fslib';
+import {Hooks as StageHooks}                                                  from '@yarnpkg/plugin-stage';
+import mm                                                                     from 'micromatch';
+import tar                                                                    from 'tar-stream';
+import {createGzip}                                                           from 'zlib';
 
-import {Hooks}                                                     from './';
+import {Hooks}                                                                from './';
 
 const NEVER_IGNORE = [
   `/package.json`,
@@ -57,6 +57,10 @@ export async function prepareForPack(workspace: Workspace, {report}: {report: Re
   await scriptUtils.maybeExecuteWorkspaceLifecycleScript(workspace, `prepack`, {report});
 
   try {
+    const manifestPath = ppath.join(workspace.cwd, Manifest.fileName);
+    if (await xfs.existsPromise(manifestPath))
+      await workspace.manifest.loadFile(manifestPath, {baseFs: xfs});
+
     await cb();
   } finally {
     await scriptUtils.maybeExecuteWorkspaceLifecycleScript(workspace, `postpack`, {report});
@@ -80,14 +84,13 @@ export async function genPackStream(workspace: Workspace, files?: Array<Portable
       const file = ppath.normalize(fileRequest);
 
       const source = ppath.resolve(workspace.cwd, file);
-      const dest = ppath.join(`package` as PortablePath, file);
+      const dest = ppath.join(`package`, file);
 
       const stat = await xfs.lstatPromise(source);
 
       const opts = {
         name: dest,
-        // 1984-06-22T21:50:00.000Z
-        mtime: new Date(tgzUtils.safeTime * 1000),
+        mtime: new Date(constants.SAFE_TIME * 1000),
       };
 
       const mode = executableFiles.has(file)
@@ -177,9 +180,8 @@ export async function genPackList(workspace: Workspace) {
     globalList.reject.push(workspaceAbsolutePath);
   };
 
-  maybeRejectPath(ppath.resolve(project.cwd, configuration.get(`lockfileFilename`)));
+  maybeRejectPath(ppath.resolve(project.cwd, Filename.lockfile));
 
-  maybeRejectPath(configuration.get(`bstatePath`));
   maybeRejectPath(configuration.get(`cacheFolder`));
   maybeRejectPath(configuration.get(`globalFolder`));
   maybeRejectPath(configuration.get(`installStatePath`));
@@ -332,19 +334,30 @@ function addIgnorePattern(target: Array<string>, pattern: string, {cwd}: {cwd: P
   target.push(normalizePattern(trimed, {cwd}));
 }
 
+enum MatchType {
+  None,
+  Match,
+  NegatedMatch,
+}
+
 function isIgnored(cwd: string, {globalList, ignoreLists}: {globalList: IgnoreList, ignoreLists: Array<IgnoreList> | null}) {
-  if (isMatch(cwd, globalList.accept))
-    return false;
-  if (isMatch(cwd, globalList.reject))
-    return true;
+  const globalAcceptMatchType = matchPatternType(cwd, globalList.accept);
+  if (globalAcceptMatchType !== MatchType.None)
+    return globalAcceptMatchType === MatchType.NegatedMatch;
+
+  const globalRejectMatchType = matchPatternType(cwd, globalList.reject);
+  if (globalRejectMatchType !== MatchType.None)
+    return globalRejectMatchType === MatchType.Match;
 
   if (ignoreLists !== null) {
     for (const ignoreList of ignoreLists) {
-      if (isMatch(cwd, ignoreList.accept))
-        return false;
+      const acceptMatchType = matchPatternType(cwd, ignoreList.accept);
+      if (acceptMatchType !== MatchType.None)
+        return acceptMatchType === MatchType.NegatedMatch;
 
-      if (isMatch(cwd, ignoreList.reject)) {
-        return true;
+      const rejectMatchType = matchPatternType(cwd, ignoreList.reject);
+      if (rejectMatchType !== MatchType.None) {
+        return rejectMatchType === MatchType.Match;
       }
     }
   }
@@ -352,7 +365,7 @@ function isIgnored(cwd: string, {globalList, ignoreLists}: {globalList: IgnoreLi
   return false;
 }
 
-function isMatch(path: string, patterns: Array<string>) {
+function matchPatternType(path: string, patterns: Array<string>) {
   let inclusives = patterns;
   const exclusives = [];
 
@@ -370,11 +383,11 @@ function isMatch(path: string, patterns: Array<string>) {
   }
 
   if (isMatchBasename(path, exclusives))
-    return false;
+    return MatchType.NegatedMatch;
   if (isMatchBasename(path, inclusives))
-    return true;
+    return MatchType.Match;
 
-  return false;
+  return MatchType.None;
 }
 
 function isMatchBasename(path: string, patterns: Array<string>) {

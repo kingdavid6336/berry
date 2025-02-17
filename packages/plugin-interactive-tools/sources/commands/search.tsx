@@ -1,16 +1,10 @@
-import {BaseCommand}                         from '@yarnpkg/cli';
-import {Configuration, structUtils}          from '@yarnpkg/core';
-import {Gem}                                 from '@yarnpkg/libui/sources/components/Gem';
-import {ScrollableItems}                     from '@yarnpkg/libui/sources/components/ScrollableItems';
-import {useKeypress}                         from '@yarnpkg/libui/sources/hooks/useKeypress';
-import {useMinistore}                        from '@yarnpkg/libui/sources/hooks/useMinistore';
-import {renderForm, SubmitInjectedComponent} from '@yarnpkg/libui/sources/misc/renderForm';
-import {Command, Usage}                      from 'clipanion';
-import InkTextInput                          from 'ink-text-input';
-import {Box, Text}                           from 'ink';
-import React, {useEffect, useState}          from 'react';
+import {BaseCommand}                  from '@yarnpkg/cli';
+import {Configuration, structUtils}   from '@yarnpkg/core';
+import * as libuiUtils                from '@yarnpkg/libui/sources/libuiUtils';
+import type {SubmitInjectedComponent} from '@yarnpkg/libui/sources/misc/renderForm';
+import {Command, Usage}               from 'clipanion';
 
-import {AlgoliaPackage, search}              from '../algolia';
+import {AlgoliaPackage, search}       from '../algolia';
 
 const TARGETS = [`regular`, `dev`, `peer`];
 
@@ -33,37 +27,49 @@ export default class SearchCommand extends BaseCommand {
   });
 
   async execute() {
+    libuiUtils.checkRequirements(this.context);
+
+    const {Gem} = await import(`@yarnpkg/libui/sources/components/Gem`);
+    const {ScrollableItems} = await import(`@yarnpkg/libui/sources/components/ScrollableItems`);
+    const {useKeypress} = await import(`@yarnpkg/libui/sources/hooks/useKeypress`);
+    const {useMinistore} = await import(`@yarnpkg/libui/sources/hooks/useMinistore`);
+    const {renderForm} = await import(`@yarnpkg/libui/sources/misc/renderForm`);
+
+    const {default: InkTextInput} = await import(`ink-text-input`);
+    const {Box, Text} = await import(`ink`);
+    const {default: React, useEffect, useState} = await import(`react`);
+
     const configuration = await Configuration.find(this.context.cwd, this.context.plugins);
 
     const Prompt = () => {
       return (
-        <Box flexDirection="row">
-          <Box flexDirection="column" width={48}>
+        <Box flexDirection={`row`}>
+          <Box flexDirection={`column`} width={48}>
             <Box>
               <Text>
-                Press <Text bold color="cyanBright">{`<up>`}</Text>/<Text bold color="cyanBright">{`<down>`}</Text> to move between packages.
+                Press <Text bold color={`cyanBright`}>{`<up>`}</Text>/<Text bold color={`cyanBright`}>{`<down>`}</Text> to move between packages.
               </Text>
             </Box>
             <Box>
               <Text>
-                Press <Text bold color="cyanBright">{`<space>`}</Text> to select a package.
+                Press <Text bold color={`cyanBright`}>{`<space>`}</Text> to select a package.
               </Text>
             </Box>
             <Box>
               <Text>
-                Press <Text bold color="cyanBright">{`<space>`}</Text> again to change the target.
+                Press <Text bold color={`cyanBright`}>{`<space>`}</Text> again to change the target.
               </Text>
             </Box>
           </Box>
-          <Box flexDirection="column">
+          <Box flexDirection={`column`}>
             <Box marginLeft={1}>
               <Text>
-                Press <Text bold color="cyanBright">{`<enter>`}</Text> to install the selected packages.
+                Press <Text bold color={`cyanBright`}>{`<enter>`}</Text> to install the selected packages.
               </Text>
             </Box>
             <Box marginLeft={1}>
               <Text>
-                Press <Text bold color="cyanBright">{`<ctrl+c>`}</Text> to abort.
+                Press <Text bold color={`cyanBright`}>{`<ctrl+c>`}</Text> to abort.
               </Text>
             </Box>
           </Box>
@@ -73,14 +79,14 @@ export default class SearchCommand extends BaseCommand {
 
     const SearchColumnNames = () => {
       return <>
-        <Box width={15}><Text bold underline color="gray">Owner</Text></Box>
-        <Box width={11}><Text bold underline color="gray">Version</Text></Box>
-        <Box width={10}><Text bold underline color="gray">Downloads</Text></Box>
+        <Box width={15}><Text bold underline color={`gray`}>Owner</Text></Box>
+        <Box width={11}><Text bold underline color={`gray`}>Version</Text></Box>
+        <Box width={10}><Text bold underline color={`gray`}>Downloads</Text></Box>
       </>;
     };
 
     const SelectedColumnNames = () => {
-      return <Box width={17}><Text bold underline color="gray">Target</Text></Box>;
+      return <Box width={17}><Text bold underline color={`gray`}>Target</Text></Box>;
     };
 
     const HitEntry = ({hit, active}: {hit: AlgoliaPackage, active: boolean}) => {
@@ -112,17 +118,17 @@ export default class SearchCommand extends BaseCommand {
       return (
         <Box>
           <Box width={45}>
-            <Text bold wrap="wrap">
+            <Text bold wrap={`wrap`}>
               {prettyIdent}
             </Text>
           </Box>
           <Box width={14} marginLeft={1}>
-            <Text bold wrap="truncate">
+            <Text bold wrap={`truncate`}>
               {hit.owner.name}
             </Text>
           </Box>
           <Box width={10} marginLeft={1}>
-            <Text italic wrap="truncate">
+            <Text italic wrap={`truncate`}>
               {hit.version}
             </Text>
           </Box>
@@ -153,7 +159,7 @@ export default class SearchCommand extends BaseCommand {
                 {` `}<Gem active={action === target} />{` `}
                 <Text bold>{target}</Text>
               </Text>
-            </Box>
+            </Box>,
         )}
       </Box>;
     };
@@ -230,7 +236,7 @@ export default class SearchCommand extends BaseCommand {
               loop={false}
               children={hits.map(hit => <HitEntry key={hit.name} hit={hit} active={false} />)}
               willReachEnd={fetchNextPageHits}
-            /> : <Text color="gray">Start typing...</Text>
+            /> : <Text color={`gray`}>Start typing...</Text>
           }
           <Box flexDirection={`row`} marginTop={1}>
             <Box width={49}>
@@ -240,15 +246,19 @@ export default class SearchCommand extends BaseCommand {
           </Box>
           {selectedPackages.length ?
             selectedPackages.map(
-              name => <SelectedEntry key={name} name={name} active={false}/>
-            ) : <Text color="gray">No selected packages...</Text>
+              name => <SelectedEntry key={name} name={name} active={false}/>,
+            ) : <Text color={`gray`}>No selected packages...</Text>
           }
           <PoweredByAlgolia />
         </Box>
       );
     };
 
-    const installRequests = await renderForm(SearchApp, {});
+    const installRequests = await renderForm(SearchApp, {}, {
+      stdin: this.context.stdin,
+      stdout: this.context.stdout,
+      stderr: this.context.stderr,
+    });
     if (typeof installRequests === `undefined`)
       return 1;
 

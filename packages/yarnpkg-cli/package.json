@@ -1,48 +1,56 @@
 {
   "name": "@yarnpkg/cli",
-  "version": "2.4.0",
+  "version": "4.6.0",
   "license": "BSD-2-Clause",
   "main": "./sources/index.ts",
+  "exports": {
+    ".": "./sources/index.ts",
+    "./polyfills": "./sources/polyfills.ts",
+    "./package.json": "./package.json"
+  },
   "dependencies": {
-    "@yarnpkg/core": "workspace:^2.4.0",
-    "@yarnpkg/fslib": "workspace:^2.4.0",
-    "@yarnpkg/libzip": "workspace:^2.2.1",
-    "@yarnpkg/parsers": "workspace:^2.3.0",
-    "@yarnpkg/plugin-compat": "workspace:^2.2.0",
-    "@yarnpkg/plugin-dlx": "workspace:^2.1.4",
-    "@yarnpkg/plugin-essentials": "workspace:^2.4.0",
-    "@yarnpkg/plugin-file": "workspace:^2.2.0",
-    "@yarnpkg/plugin-git": "workspace:^2.3.0",
-    "@yarnpkg/plugin-github": "workspace:^2.1.2",
-    "@yarnpkg/plugin-http": "workspace:^2.1.2",
-    "@yarnpkg/plugin-init": "workspace:^2.2.2",
-    "@yarnpkg/plugin-link": "workspace:^2.1.1",
-    "@yarnpkg/plugin-node-modules": "workspace:^2.3.0",
-    "@yarnpkg/plugin-npm": "workspace:^2.4.0",
-    "@yarnpkg/plugin-npm-cli": "workspace:^2.3.0",
-    "@yarnpkg/plugin-pack": "workspace:^2.2.3",
-    "@yarnpkg/plugin-patch": "workspace:^2.1.2",
-    "@yarnpkg/plugin-pnp": "workspace:^2.4.0",
-    "@yarnpkg/shell": "workspace:^2.4.1",
-    "chalk": "^3.0.0",
-    "ci-info": "^2.0.0",
-    "clipanion": "^3.0.0-rc.10",
-    "fromentries": "^1.2.0",
+    "@yarnpkg/core": "workspace:^",
+    "@yarnpkg/fslib": "workspace:^",
+    "@yarnpkg/libzip": "workspace:^",
+    "@yarnpkg/parsers": "workspace:^",
+    "@yarnpkg/plugin-compat": "workspace:^",
+    "@yarnpkg/plugin-constraints": "workspace:^",
+    "@yarnpkg/plugin-dlx": "workspace:^",
+    "@yarnpkg/plugin-essentials": "workspace:^",
+    "@yarnpkg/plugin-exec": "workspace:^",
+    "@yarnpkg/plugin-file": "workspace:^",
+    "@yarnpkg/plugin-git": "workspace:^",
+    "@yarnpkg/plugin-github": "workspace:^",
+    "@yarnpkg/plugin-http": "workspace:^",
+    "@yarnpkg/plugin-init": "workspace:^",
+    "@yarnpkg/plugin-interactive-tools": "workspace:^",
+    "@yarnpkg/plugin-link": "workspace:^",
+    "@yarnpkg/plugin-nm": "workspace:^",
+    "@yarnpkg/plugin-npm": "workspace:^",
+    "@yarnpkg/plugin-npm-cli": "workspace:^",
+    "@yarnpkg/plugin-pack": "workspace:^",
+    "@yarnpkg/plugin-patch": "workspace:^",
+    "@yarnpkg/plugin-pnp": "workspace:^",
+    "@yarnpkg/plugin-pnpm": "workspace:^",
+    "@yarnpkg/plugin-stage": "workspace:^",
+    "@yarnpkg/plugin-typescript": "workspace:^",
+    "@yarnpkg/plugin-version": "workspace:^",
+    "@yarnpkg/plugin-workspace-tools": "workspace:^",
+    "@yarnpkg/shell": "workspace:^",
+    "ci-info": "^4.0.0",
+    "clipanion": "^4.0.0-rc.2",
     "semver": "^7.1.2",
-    "tslib": "^1.13.0",
-    "typanion": "^3.3.0"
+    "tslib": "^2.4.0",
+    "typanion": "^3.14.0"
   },
   "devDependencies": {
-    "@types/ci-info": "^2",
     "@types/semver": "^7.1.0",
-    "@yarnpkg/builder": "workspace:^2.1.3",
-    "@yarnpkg/monorepo": "workspace:0.0.0",
-    "@yarnpkg/pnpify": "workspace:^2.4.0",
-    "micromatch": "^4.0.2",
-    "typescript": "4.1.0-beta"
+    "@yarnpkg/builder": "workspace:^",
+    "@yarnpkg/monorepo": "workspace:^",
+    "@yarnpkg/pnpify": "workspace:^"
   },
   "peerDependencies": {
-    "@yarnpkg/core": "^2.4.0"
+    "@yarnpkg/core": "workspace:^"
   },
   "scripts": {
     "postpack": "rm -rf lib",
@@ -54,8 +62,11 @@
   },
   "publishConfig": {
     "main": "./lib/index.js",
-    "types": "./lib/index.d.ts",
-    "bin": null
+    "bin": null,
+    "exports": {
+      ".": "./lib/index.js",
+      "./package.json": "./package.json"
+    }
   },
   "files": [
     "/lib/**/*",
@@ -67,19 +78,27 @@
       "standard": [
         "@yarnpkg/plugin-essentials",
         "@yarnpkg/plugin-compat",
+        "@yarnpkg/plugin-constraints",
         "@yarnpkg/plugin-dlx",
+        "@yarnpkg/plugin-exec",
         "@yarnpkg/plugin-file",
         "@yarnpkg/plugin-git",
         "@yarnpkg/plugin-github",
         "@yarnpkg/plugin-http",
         "@yarnpkg/plugin-init",
+        "@yarnpkg/plugin-interactive-tools",
         "@yarnpkg/plugin-link",
-        "@yarnpkg/plugin-node-modules",
+        "@yarnpkg/plugin-nm",
         "@yarnpkg/plugin-npm",
         "@yarnpkg/plugin-npm-cli",
         "@yarnpkg/plugin-pack",
         "@yarnpkg/plugin-patch",
-        "@yarnpkg/plugin-pnp"
+        "@yarnpkg/plugin-pnp",
+        "@yarnpkg/plugin-pnpm",
+        "@yarnpkg/plugin-stage",
+        "@yarnpkg/plugin-typescript",
+        "@yarnpkg/plugin-version",
+        "@yarnpkg/plugin-workspace-tools"
       ]
     }
   },
@@ -89,6 +108,7 @@
     "directory": "packages/yarnpkg-cli"
   },
   "engines": {
-    "node": ">=10.19.0"
-  }
+    "node": ">=18.12.0"
+  },
+  "stableVersion": "4.6.0"
 }

@@ -32,7 +32,7 @@ export class NpmHttpFetcher implements Fetcher {
       onHit: () => opts.report.reportCacheHit(locator),
       onMiss: () => opts.report.reportCacheMiss(locator, `${structUtils.prettyLocator(opts.project.configuration, locator)} can't be found in the cache and will be fetched from the remote server`),
       loader: () => this.fetchFromNetwork(locator, opts),
-      skipIntegrityCheck: opts.skipIntegrityCheck,
+      ...opts.cacheOptions,
     });
 
     return {
@@ -49,12 +49,13 @@ export class NpmHttpFetcher implements Fetcher {
       throw new Error(`Assertion failed: The archiveUrl querystring parameter should have been available`);
 
     const sourceBuffer = await npmHttpUtils.get(params.__archiveUrl, {
+      customErrorMessage: npmHttpUtils.customPackageError,
       configuration: opts.project.configuration,
       ident: locator,
     });
 
     return await tgzUtils.convertToZip(sourceBuffer, {
-      compressionLevel: opts.project.configuration.get(`compressionLevel`),
+      configuration: opts.project.configuration,
       prefixPath: structUtils.getIdentVendorPath(locator),
       stripComponents: 1,
     });

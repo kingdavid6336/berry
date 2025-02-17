@@ -4,8 +4,12 @@ import * as nodeUtils                      from 'util';
 import {S_IFDIR, S_IFLNK, S_IFMT, S_IFREG} from './constants';
 import {Filename}                          from './path';
 
-export class DirEntry {
+export const DEFAULT_MODE = S_IFREG | 0o644;
+
+export class DirEntry<T = undefined> {
   public name: Filename = `` as Filename;
+  public path: T = `` as T;
+
   public mode: number = 0;
 
   isBlockDevice() {
@@ -56,7 +60,7 @@ export class StatEntry {
 
   dev = 0;
   ino = 0;
-  mode = S_IFREG | 0o644;
+  mode = DEFAULT_MODE;
   nlink = 1;
   rdev = 0;
   blocks = 1;
@@ -105,7 +109,7 @@ export class BigIntStatsEntry {
   atimeNs = BigInt(0);
   mtimeNs = BigInt(0);
   ctimeNs = BigInt(0);
-  birthtimeNs= BigInt(0);
+  birthtimeNs = BigInt(0);
 
   atime = new Date(0);
   mtime = new Date(0);
@@ -114,7 +118,7 @@ export class BigIntStatsEntry {
 
   dev = BigInt(0);
   ino = BigInt(0);
-  mode = BigInt(S_IFREG | 0o644);
+  mode = BigInt(DEFAULT_MODE);
   nlink = BigInt(1);
   rdev = BigInt(0);
   blocks = BigInt(1);
@@ -161,7 +165,7 @@ export function makeEmptyStats() {
  */
 export function clearStats(stats: Stats | BigIntStats) {
   for (const key in stats) {
-    if (Object.prototype.hasOwnProperty.call(stats, key)) {
+    if (Object.hasOwn(stats, key)) {
       const element = stats[key as keyof typeof stats];
       if (typeof element === `number`) {
         // @ts-expect-error Typescript can't tell that stats[key] is a number
@@ -183,7 +187,7 @@ export function convertToBigIntStats(stats: Stats): BigIntStats {
   const bigintStats = new BigIntStatsEntry();
 
   for (const key in stats) {
-    if (Object.prototype.hasOwnProperty.call(stats, key)) {
+    if (Object.hasOwn(stats, key)) {
       const element = stats[key as keyof typeof stats];
       if (typeof element === `number`) {
         // @ts-expect-error Typescript isn't able to tell this is valid

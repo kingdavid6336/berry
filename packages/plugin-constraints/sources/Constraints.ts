@@ -1,27 +1,27 @@
 /// <reference path="./tauProlog.d.ts"/>
-
-import {Ident, MessageName, Project, ReportError, Workspace} from '@yarnpkg/core';
-import {miscUtils, structUtils}                              from '@yarnpkg/core';
-import {xfs, ppath, PortablePath}                            from '@yarnpkg/fslib';
+import {Ident, MessageName, nodeUtils, Project, ReportError, Workspace} from '@yarnpkg/core';
+import {miscUtils, structUtils}                                         from '@yarnpkg/core';
+import {xfs, ppath, PortablePath}                                       from '@yarnpkg/fslib';
 // @ts-expect-error
-import plLists                                               from 'tau-prolog/modules/lists';
-import pl                                                    from 'tau-prolog';
+import plLists                                                          from 'tau-prolog/modules/lists';
+import pl                                                               from 'tau-prolog';
 
-import {linkProjectToSession}                                from './tauModule';
+import * as constraintUtils                                             from './constraintUtils';
+import {linkProjectToSession}                                           from './tauModule';
 
 plLists(pl);
 
 export type EnforcedDependency = {
-  workspace: Workspace,
-  dependencyIdent: Ident,
-  dependencyRange: string | null,
-  dependencyType: DependencyType,
+  workspace: Workspace;
+  dependencyIdent: Ident;
+  dependencyRange: string | null;
+  dependencyType: DependencyType;
 };
 
 export type EnforcedField = {
-  workspace: Workspace,
-  fieldPath: string,
-  fieldValue: string | null,
+  workspace: Workspace;
+  fieldPath: string;
+  fieldValue: string | null;
 };
 
 export enum DependencyType {
@@ -41,20 +41,25 @@ function extractErrorImpl(value: any): any {
     return value.value;
 
   if (value instanceof pl.type.Term) {
-    if (value.args.length === 0)
-      return value.id;
-
     switch (value.indicator) {
       case `throw/1`:
         return extractErrorImpl(value.args[0]);
       case `error/1`:
         return extractErrorImpl(value.args[0]);
       case `error/2`:
-        return Object.assign(extractErrorImpl(value.args[0]), ...extractErrorImpl(value.args[1]));
+        if (value.args[0] instanceof pl.type.Term && value.args[0].indicator === `syntax_error/1`) {
+          return Object.assign(extractErrorImpl(value.args[0]), ...extractErrorImpl(value.args[1]));
+        } else {
+          const err = extractErrorImpl(value.args[0]);
+          err.message += ` (in ${extractErrorImpl(value.args[1])})`;
+          return err;
+        }
       case `syntax_error/1`:
         return new ReportError(MessageName.PROLOG_SYNTAX_ERROR, `Syntax error: ${extractErrorImpl(value.args[0])}`);
       case `existence_error/2`:
         return new ReportError(MessageName.PROLOG_EXISTENCE_ERROR, `Existence error: ${extractErrorImpl(value.args[0])} ${extractErrorImpl(value.args[1])} not found`);
+      case `instantiation_error/0`:
+        return new ReportError(MessageName.PROLOG_INSTANTIATION_ERROR, `Instantiation error: an argument is variable when an instantiated argument was expected`);
       case `line/1`:
         return {line: extractErrorImpl(value.args[0])};
       case `column/1`:
@@ -65,6 +70,8 @@ function extractErrorImpl(value: any): any {
         return [extractErrorImpl(value.args[0])].concat(extractErrorImpl(value.args[1]));
       case `//2`:
         return `${extractErrorImpl(value.args[0])}/${extractErrorImpl(value.args[1])}`;
+      default:
+        return value.id;
     }
   }
 
@@ -93,7 +100,11 @@ class Session {
   private readonly session: pl.type.Session;
 
   public constructor(project: Project, source: string) {
-    this.session = pl.create();
+    // The default Tau Prolog resolution steps limit is quite small
+    // By using a proportional limit (instead of no limit), we avoid triggering pathological cases "easily"
+    // See https://github.com/yarnpkg/berry/issues/1260
+    const limit = 1000 * project.workspaces.length;
+    this.session = pl.create(limit);
     linkProjectToSession(this.session, project);
 
     this.session.consult(`:- use_module(library(lists)).`);
@@ -116,6 +127,9 @@ class Session {
 
     while (true) {
       const answer = await this.fetchNextAnswer();
+
+      if (answer === null)
+        throw new ReportError(MessageName.PROLOG_LIMIT_EXCEEDED, `Resolution limit exceeded`);
 
       if (!answer)
         break;
@@ -152,7 +166,7 @@ function parseLinkToJson(link: pl.Link): string | null {
   }
 }
 
-export class Constraints {
+export class Constraints implements constraintUtils.Engine {
   public readonly project: Project;
 
   public readonly source: string = ``;
@@ -181,7 +195,7 @@ export class Constraints {
       const relativeCwd = workspace.relativeCwd;
 
       database += `workspace(${escape(relativeCwd)}).\n`;
-      database += `workspace_ident(${escape(relativeCwd)}, ${escape(structUtils.stringifyIdent(workspace.locator))}).\n`;
+      database += `workspace_ident(${escape(relativeCwd)}, ${escape(structUtils.stringifyIdent(workspace.anchoredLocator))}).\n`;
       database += `workspace_version(${escape(relativeCwd)}, ${escape(workspace.manifest.version)}).\n`;
 
       for (const dependencyType of DEPENDENCY_TYPES) {
@@ -224,12 +238,44 @@ export class Constraints {
     return new Session(this.project, this.fullSource);
   }
 
-  async process() {
+  async processClassic() {
     const session = this.createSession();
 
     return {
       enforcedDependencies: await this.genEnforcedDependencies(session),
       enforcedFields: await this.genEnforcedFields(session),
+    };
+  }
+
+  async process(): Promise<constraintUtils.ProcessResult> {
+    const {
+      enforcedDependencies,
+      enforcedFields,
+    } = await this.processClassic();
+
+    const manifestUpdates = new Map<PortablePath, Map<string, Map<any, Set<nodeUtils.Caller>>>>();
+
+    for (const {workspace, dependencyIdent, dependencyRange, dependencyType} of enforcedDependencies) {
+      const normalizedPath = constraintUtils.normalizePath([dependencyType, structUtils.stringifyIdent(dependencyIdent)]);
+
+      const workspaceUpdates = miscUtils.getMapWithDefault(manifestUpdates, workspace.cwd);
+      const pathUpdates = miscUtils.getMapWithDefault(workspaceUpdates, normalizedPath);
+
+      pathUpdates.set(dependencyRange ?? undefined, new Set());
+    }
+
+    for (const {workspace, fieldPath, fieldValue} of enforcedFields) {
+      const normalizedPath = constraintUtils.normalizePath(fieldPath);
+
+      const workspaceUpdates = miscUtils.getMapWithDefault(manifestUpdates, workspace.cwd);
+      const pathUpdates = miscUtils.getMapWithDefault(workspaceUpdates, normalizedPath);
+
+      pathUpdates.set(JSON.parse(fieldValue as string) ?? undefined, new Set());
+    }
+
+    return {
+      manifestUpdates,
+      reportedErrors: new Map(),
     };
   }
 
@@ -253,7 +299,7 @@ export class Constraints {
 
     return miscUtils.sortMap(enforcedDependencies, [
       ({dependencyRange}) => dependencyRange !== null ? `0` : `1`,
-      ({workspace}) => structUtils.stringifyIdent(workspace.locator),
+      ({workspace}) => structUtils.stringifyIdent(workspace.anchoredLocator),
       ({dependencyIdent}) => structUtils.stringifyIdent(dependencyIdent),
     ]);
   }
@@ -275,7 +321,7 @@ export class Constraints {
     }
 
     return miscUtils.sortMap(enforcedFields, [
-      ({workspace}) => structUtils.stringifyIdent(workspace.locator),
+      ({workspace}) => structUtils.stringifyIdent(workspace.anchoredLocator),
       ({fieldPath}) => fieldPath,
     ]);
   }
@@ -284,7 +330,7 @@ export class Constraints {
     const session = this.createSession();
 
     for await (const answer of session.makeQuery(query)) {
-      const parsedLinks: Record<string, string|null> = {};
+      const parsedLinks: Record<string, string | null> = {};
 
       for (const [variable, value] of Object.entries(answer.links)) {
         if (variable !== `_`) {

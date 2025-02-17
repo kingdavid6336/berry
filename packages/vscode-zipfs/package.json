@@ -7,20 +7,24 @@
   "description": "Allows to easily inspect and modify files stored within zip archives.",
   "homepage": "https://github.com/yarnpkg/berry/blob/master/packages/vscode-zipfs",
   "icon": "icon.png",
-  "version": "2.2.4",
+  "version": "3.0.0",
   "engines": {
-    "vscode": "^1.46.0",
-    "node": ">=10.19.0"
+    "vscode": "^1.54.0",
+    "node": ">=18.12.0"
   },
   "categories": [
     "Other"
   ],
+  "sponsor": {
+    "url": "https://opencollective.com/yarnpkg"
+  },
   "activationEvents": [
     "workspaceContains:**/*.zip",
     "onLanguage:zip",
     "onFileSystem:zip",
     "onCommand:zipfs.mountZipFile",
-    "onCommand:zipfs.mountZipEditor"
+    "onCommand:zipfs.mountZipEditor",
+    "onStartupFinished"
   ],
   "main": "./build/index.js",
   "sideEffects": false,
@@ -40,7 +44,12 @@
     "commands": [
       {
         "command": "zipfs.mountZipFile",
-        "title": "Mount as Zip",
+        "title": "Mount Zip",
+        "category": "Zip"
+      },
+      {
+        "command": "zipfs.unmountZipFile",
+        "title": "Unmount Zip",
         "category": "Zip"
       },
       {
@@ -52,8 +61,13 @@
     "menus": {
       "explorer/context": [
         {
-          "when": "resourceLangId == zip",
+          "when": "resourceLangId == zip && !explorerResourceIsRoot",
           "command": "zipfs.mountZipFile",
+          "group": "navigation"
+        },
+        {
+          "when": "resourceLangId == zip && explorerResourceIsRoot",
+          "command": "zipfs.unmountZipFile",
           "group": "navigation"
         }
       ],
@@ -63,6 +77,10 @@
           "command": "zipfs.mountZipFile"
         },
         {
+          "when": "false",
+          "command": "zipfs.unmountZipFile"
+        },
+        {
           "when": "editorLangId == zip",
           "command": "zipfs.mountZipEditor"
         }
@@ -70,23 +88,26 @@
     }
   },
   "devDependencies": {
-    "@types/vscode": "^1.46.0",
-    "@yarnpkg/fslib": "workspace:^2.4.0",
-    "@yarnpkg/libzip": "workspace:^2.2.1",
-    "@yarnpkg/pnpify": "workspace:^2.4.0",
-    "ts-loader": "^7.0.5",
-    "typescript": "4.1.0-beta",
-    "vsce": "^1.76.1",
-    "webpack": "^5.1.1",
-    "webpack-cli": "^4.0.0-beta.8"
+    "@rollup/plugin-commonjs": "^21.0.1",
+    "@rollup/plugin-node-resolve": "^11.0.1",
+    "@types/semver": "^7.1.0",
+    "@types/vscode": "^1.54.0",
+    "@yarnpkg/fslib": "workspace:^",
+    "@yarnpkg/libzip": "workspace:^",
+    "esbuild": "npm:esbuild-wasm@^0.23.0",
+    "rollup": "^2.59.0",
+    "rollup-plugin-esbuild": "^3.0.2",
+    "rollup-plugin-terser": "^7.0.2",
+    "semver": "^7.1.2",
+    "vsce": "^2.9.2"
   },
   "scripts": {
-    "vscode:prepublish": "run build",
+    "vscode:prepublish": "run build && cp ../../LICENSE.md ./LICENSE.md",
     "package:vscode-zipfs": "run package",
     "package": "run vsce package --yarn",
     "build:vscode-zipfs": "run build",
-    "build": "run webpack-cli",
-    "watch": "run webpack-cli --watch --mode development",
+    "build": "rollup -c",
+    "watch": "NODE_ENV=development rollup -cw",
     "code": "code --extensionDevelopmentPath=\"$(pwd)\" \"$(pwd)\""
   },
   "repository": {
@@ -95,6 +116,7 @@
     "directory": "packages/vscode-zipfs"
   },
   "dependencies": {
-    "tslib": "^1.13.0"
-  }
+    "tslib": "^2.4.0"
+  },
+  "stableVersion": "3.0.0"
 }

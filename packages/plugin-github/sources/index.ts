@@ -2,6 +2,10 @@ import {Plugin}            from '@yarnpkg/core';
 import {Hooks as GitHooks} from '@yarnpkg/plugin-git';
 
 import {GithubFetcher}     from './GithubFetcher';
+import * as githubUtils    from './githubUtils';
+
+export {githubUtils};
+export {GithubFetcher};
 
 const plugin: Plugin<GitHooks> = {
   hooks: {
@@ -15,7 +19,7 @@ const plugin: Plugin<GitHooks> = {
 
       try {
         return await fetcher.fetch(locator, opts);
-      } catch (error) {
+      } catch {
         return null;
       }
     },

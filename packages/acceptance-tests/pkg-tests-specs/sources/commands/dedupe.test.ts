@@ -1,4 +1,5 @@
-import {tests} from 'pkg-tests-core';
+import {ppath, xfs, Filename} from '@yarnpkg/fslib';
+import {tests}                from 'pkg-tests-core';
 
 const {setPackageWhitelist} = tests;
 
@@ -19,7 +20,7 @@ describe(`Commands`, () => {
         await expect(run(`dedupe`, `--check`)).rejects.toMatchObject({
           stdout: expect.stringContaining(`2 packages can be deduped using the highest strategy`),
         });
-      })
+      }),
     );
 
     describe(`strategies`, () => {
@@ -49,7 +50,7 @@ describe(`Commands`, () => {
                 },
               },
             });
-          })
+          }),
         );
 
         it(
@@ -80,7 +81,50 @@ describe(`Commands`, () => {
                 },
               },
             });
-          })
+          }),
+        );
+
+        it(
+          `should not throw on resolutions by npm-tag-resolver with __archiveUrl`,
+          makeTemporaryEnv({
+            dependencies: {[`no-deps`]: `latest`},
+          }, async ({path, run, source}) => {
+            await run(`install`);
+            await run(`add`, `one-range-dep`);
+
+            const lockFilePath = ppath.join(path, Filename.lockfile);
+            let lockContent = await xfs.readFilePromise(lockFilePath, `utf8`);
+
+            lockContent = lockContent.replace(`"no-deps@npm:2.0.0"`, `"no-deps@npm:2.0.0::__archiveUrl=https%3A%2F%2Fregistry.com%2Fno-deps-2.0.0.tgz"`);
+            await xfs.writeFilePromise(lockFilePath, lockContent);
+
+            await expect(run(`dedupe`, `--check`)).resolves.toMatchObject({
+              code: 0,
+            });
+          }),
+        );
+
+        it(
+          `should handle aliased packages`,
+          makeTemporaryEnv({
+            dependencies: {
+              [`no-deps`]: `npm:no-deps-bins@^1.0.0`,
+              [`one-range-dep`]: `1.0.0`,
+            },
+          }, async ({path, run, source}) => {
+            await run(`install`);
+
+            await run(`dedupe`);
+
+            await expect(run(`dedupe`, `--check`)).resolves.toMatchObject({
+              code: 0,
+            });
+
+            await expect(source(`require('no-deps')`)).resolves.toMatchObject({
+              name: `no-deps-bins`,
+              version: `1.0.0`,
+            });
+          }),
         );
       });
     });
@@ -110,7 +154,7 @@ describe(`Commands`, () => {
               },
             },
           });
-        })
+        }),
       );
 
       it(
@@ -137,7 +181,7 @@ describe(`Commands`, () => {
               },
             },
           });
-        })
+        }),
       );
 
       it(
@@ -164,7 +208,7 @@ describe(`Commands`, () => {
               },
             },
           });
-        })
+        }),
       );
 
       it(
@@ -191,7 +235,7 @@ describe(`Commands`, () => {
               },
             },
           });
-        })
+        }),
       );
     });
 
@@ -209,7 +253,7 @@ describe(`Commands`, () => {
             await expect(run(`dedupe`, `--check`)).rejects.toMatchObject({
               code: 1,
             });
-          })
+          }),
         );
 
         it(
@@ -224,7 +268,7 @@ describe(`Commands`, () => {
             await expect(run(`dedupe`, `--check`)).resolves.toMatchObject({
               code: 0,
             });
-          })
+          }),
         );
       });
 
@@ -247,7 +291,7 @@ describe(`Commands`, () => {
           });
 
           expect.assertions(1);
-        })
+        }),
       );
 
       test(
@@ -262,7 +306,7 @@ describe(`Commands`, () => {
           await expect(run(`dedupe`, `--check`, `--strategy`, `highest`)).rejects.toMatchObject({
             code: 1,
           });
-        })
+        }),
       );
     });
   });

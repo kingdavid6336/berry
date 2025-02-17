@@ -10,18 +10,40 @@ export const CorePlugin: Plugin = {
   hooks: {
     reduceDependency: (dependency: Descriptor, project: Project, locator: Locator, initialDependency: Descriptor, {resolver, resolveOptions}: {resolver: Resolver, resolveOptions: ResolveOptions}) => {
       for (const {pattern, reference} of project.topLevelWorkspace.manifest.resolutions) {
-        if (pattern.from && pattern.from.fullName !== structUtils.stringifyIdent(locator))
-          continue;
-        if (pattern.from && pattern.from.description && pattern.from.description !== locator.reference)
-          continue;
+        if (pattern.from) {
+          if (pattern.from.fullName !== structUtils.stringifyIdent(locator))
+            continue;
 
-        if (pattern.descriptor.fullName !== structUtils.stringifyIdent(dependency))
-          continue;
-        if (pattern.descriptor.description && pattern.descriptor.description !== dependency.range)
-          continue;
+          const normalizedFrom = project.configuration.normalizeLocator(
+            structUtils.makeLocator(
+              structUtils.parseIdent(pattern.from.fullName),
+              pattern.from.description ?? locator.reference,
+            ),
+          );
+
+          if (normalizedFrom.locatorHash !== locator.locatorHash) {
+            continue;
+          }
+        }
+
+        /* All `resolutions` field entries have a descriptor*/ {
+          if (pattern.descriptor.fullName !== structUtils.stringifyIdent(dependency))
+            continue;
+
+          const normalizedDescriptor = project.configuration.normalizeDependency(
+            structUtils.makeDescriptor(
+              structUtils.parseLocator(pattern.descriptor.fullName),
+              pattern.descriptor.description ?? dependency.range,
+            ),
+          );
+
+          if (normalizedDescriptor.descriptorHash !== dependency.descriptorHash) {
+            continue;
+          }
+        }
 
         const alias = resolver.bindDescriptor(
-          structUtils.makeDescriptor(dependency, reference),
+          project.configuration.normalizeDependency(structUtils.makeDescriptor(dependency, reference)),
           project.topLevelWorkspace.anchoredLocator,
           resolveOptions,
         );
@@ -33,8 +55,8 @@ export const CorePlugin: Plugin = {
     },
 
     validateProject: async (project: Project, report: {
-      reportWarning: (name: MessageName, text: string) => void,
-      reportError: (name: MessageName, text: string) => void,
+      reportWarning: (name: MessageName, text: string) => void;
+      reportError: (name: MessageName, text: string) => void;
     }) => {
       for (const workspace of project.workspaces) {
         const workspaceName = structUtils.prettyWorkspace(project.configuration, workspace);
@@ -49,8 +71,8 @@ export const CorePlugin: Plugin = {
     },
 
     validateWorkspace: async (workspace: Workspace, report: {
-      reportWarning: (name: MessageName, text: string) => void,
-      reportError: (name: MessageName, text: string) => void,
+      reportWarning: (name: MessageName, text: string) => void;
+      reportError: (name: MessageName, text: string) => void;
     }) => {
       // Validate manifest
       const {manifest} = workspace;

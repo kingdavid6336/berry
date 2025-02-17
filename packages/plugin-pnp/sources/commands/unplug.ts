@@ -3,7 +3,6 @@ import {Cache, Configuration, Project, StreamReport, Package, MessageName, forma
 import {structUtils, semverUtils}                                                                                          from '@yarnpkg/core';
 import {Command, Option, Usage, UsageError}                                                                                from 'clipanion';
 import micromatch                                                                                                          from 'micromatch';
-import semver                                                                                                              from 'semver';
 
 import * as pnpUtils                                                                                                       from '../pnpUtils';
 
@@ -85,7 +84,7 @@ export default class UnplugCommand extends BaseCommand {
         ? patternDescriptor
         : structUtils.makeDescriptor(patternDescriptor, `*`);
 
-      if (!semver.validRange(pseudoDescriptor.range))
+      if (!semverUtils.validRange(pseudoDescriptor.range))
         throw new UsageError(`The range of the descriptor patterns must be a valid semver range (${structUtils.prettyDescriptor(configuration, pseudoDescriptor)})`);
 
       return (pkg: Package) => {
@@ -122,6 +121,10 @@ export default class UnplugCommand extends BaseCommand {
         if (seen.has(pkg.locatorHash))
           return;
 
+        const isWorkspace = !!project.tryWorkspaceByLocator(pkg);
+        if (depth > 0 && !this.recursive && isWorkspace)
+          return;
+
         seen.add(pkg.locatorHash);
 
         // Note: We shouldn't skip virtual packages, as
@@ -146,13 +149,8 @@ export default class UnplugCommand extends BaseCommand {
         }
       };
 
-      for (const workspace of roots) {
-        const pkg = project.storedPackages.get(workspace.anchoredLocator.locatorHash);
-        if (!pkg)
-          throw new Error(`Assertion failed: The package should have been registered`);
-
-        traverse(pkg, 0);
-      }
+      for (const workspace of roots)
+        traverse(workspace.anchoredPackage, 0);
 
       return selection;
     };
@@ -182,7 +180,7 @@ export default class UnplugCommand extends BaseCommand {
       return structUtils.stringifyLocator(pkg);
     });
 
-    const report = await StreamReport.start({
+    const unplugReport = await StreamReport.start({
       configuration,
       stdout: this.context.stdout,
       json: this.json,
@@ -202,11 +200,19 @@ export default class UnplugCommand extends BaseCommand {
 
       await project.topLevelWorkspace.persistManifest();
 
-      report.reportSeparator();
-
-      await project.install({cache, report});
+      if (!this.json) {
+        report.reportSeparator();
+      }
     });
 
-    return report.exitCode();
+    if (unplugReport.hasErrors())
+      return unplugReport.exitCode();
+
+    return await project.installWithNewReport({
+      json: this.json,
+      stdout: this.context.stdout,
+    }, {
+      cache,
+    });
   }
 }

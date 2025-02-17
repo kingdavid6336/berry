@@ -10,7 +10,7 @@ This plugin is included by default in Yarn.
 
 1. Run `yarn patch <package name>` and edit the resulting folder.
 
-2. Once you're ready, run `yarn patch-commit <patch folder>`, and store the result inside a `.patch` file.
+2. Once you're ready, run `yarn patch-commit -s <patch folder>` to store the result inside a `.patch` file.
 
 3. Add the `patch:` protocol to your dependencies as such:
 
@@ -24,4 +24,4 @@ This plugin is included by default in Yarn.
 
 ## Caveat
 
-You cannot add dependencies through the `patch:` protocol. Check this [FAQ entry](https://yarnpkg.com/features/protocols#why-cant-i-add-dependencies-through-the-patch-protocol) for more details.
+You cannot add dependencies through the `patch:` protocol. Check this [FAQ entry](https://yarnpkg.com/features/patching#limitations) for more details.

@@ -1,32 +1,32 @@
 import {ppath, Filename}                                                                                                                                                                   from '@yarnpkg/fslib';
 import {FakeFS, NativePath, PortablePath, VirtualFS, npath}                                                                                                                                from '@yarnpkg/fslib';
-import {Module}                                                                                                                                                                            from 'module';
-import {resolve as resolveExport}                                                                                                                                                          from 'resolve.exports';
+import {Module, isBuiltin}                                                                                                                                                                 from 'module';
+import {fileURLToPath, pathToFileURL}                                                                                                                                                      from 'url';
 import {inspect}                                                                                                                                                                           from 'util';
 
+import {packageExportsResolve, packageImportsResolve}                                                                                                                                      from '../node/resolve.js';
 import {PackageInformation, PackageLocator, PnpApi, RuntimeState, PhysicalPackageLocator, DependencyTarget, ResolveToUnqualifiedOptions, ResolveUnqualifiedOptions, ResolveRequestOptions} from '../types';
 
 import {ErrorCode, makeError, getPathForDisplay}                                                                                                                                           from './internalTools';
+import {getOptionValue}                                                                                                                                                                    from './node-options.js';
+import * as nodeUtils                                                                                                                                                                      from './nodeUtils';
 
 export type MakeApiOptions = {
-  allowDebug?: boolean,
-  compatibilityMode?: boolean,
-  fakeFs: FakeFS<PortablePath>,
-  pnpapiResolution: NativePath,
+  allowDebug?: boolean;
+  compatibilityMode?: boolean;
+  fakeFs: FakeFS<PortablePath>;
+  pnpapiResolution: NativePath;
 };
 
 export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpApi {
   const alwaysWarnOnFallback = Number(process.env.PNP_ALWAYS_WARN_ON_FALLBACK) > 0;
   const debugLevel = Number(process.env.PNP_DEBUG_LEVEL);
 
-  // @ts-expect-error
-  const builtinModules = new Set(Module.builtinModules || Object.keys(process.binding(`natives`)));
-
   // Splits a require request into its components, or return null if the request is a file path
-  const pathRegExp = /^(?![a-zA-Z]:[\\/]|\\\\|\.{0,2}(?:\/|$))((?:@[^/]+\/)?[^/]+)\/*(.*|)$/;
+  const pathRegExp = /^(?![a-zA-Z]:[\\/]|\\\\|\.{0,2}(?:\/|$))((?:node:)?(?:@[^/]+\/)?[^/]+)\/*(.*|)$/;
 
   // Matches if the path starts with a valid path qualifier (./, ../, /)
-  // eslint-disable-next-line no-unused-vars
+
   const isStrictRegExp = /^(\/|\.{1,2}(\/|$))/;
 
   // Matches if the path must point to a directory (ie ends with /)
@@ -83,7 +83,6 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     ignorePattern,
     packageRegistry,
     packageLocatorsByLocations,
-    packageLocationLengths,
   } = runtimeState as RuntimeState;
 
   /**
@@ -100,7 +99,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
   }
 
   function trace(entry: ReturnType<typeof makeLogEntry>) {
-    const colors = process.stderr?.hasColors() ?? process.stdout.isTTY;
+    const colors = process.stderr?.hasColors?.() ?? process.stdout.isTTY;
     const c = (n: number | string, str: string) => `\u001b[${n}m${str}\u001b[0m`;
 
     const error = entry.error;
@@ -194,13 +193,19 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     return false;
   }
 
+  const defaultExportsConditions = new Set([
+    `node`,
+    `require`,
+    ...getOptionValue(`--conditions`),
+  ]);
+
   /**
    * Implements the node resolution for the "exports" field
    *
    * @returns The remapped path or `null` if the package doesn't have a package.json or an "exports" field
    */
-  function applyNodeExportsResolution(unqualifiedPath: PortablePath) {
-    const locator = findPackageLocator(ppath.join(unqualifiedPath, `internal.js` as Filename), {
+  function applyNodeExportsResolution(unqualifiedPath: PortablePath, conditions: Set<string> = defaultExportsConditions, issuer: PortablePath | null) {
+    const locator = findPackageLocator(ppath.join(unqualifiedPath, `internal.js`), {
       resolveIgnored: true,
       includeDiscardFromLookup: true,
     });
@@ -219,6 +224,9 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
 
     const pkgJson = JSON.parse(opts.fakeFs.readFileSync(manifestPath, `utf8`));
 
+    if (pkgJson.exports == null)
+      return null;
+
     let subpath = ppath.contains(packageLocation, unqualifiedPath);
     if (subpath === null) {
       throw makeError(
@@ -227,21 +235,27 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
       );
     }
 
-    if (!isRelativeRegexp.test(subpath))
+    if (subpath !== `.` && !isRelativeRegexp.test(subpath))
       subpath = `./${subpath}` as PortablePath;
 
-    const resolvedExport = resolveExport(pkgJson, ppath.normalize(subpath), {
-      browser: false,
-      require: true,
-      // TODO: implement support for the --conditions flag
-      // Waiting on https://github.com/nodejs/node/issues/36935
-      conditions: [],
-    });
+    try {
+      const resolvedExport = packageExportsResolve({
+        packageJSONUrl: pathToFileURL(npath.fromPortablePath(manifestPath)),
+        packageSubpath: subpath,
+        exports: pkgJson.exports,
+        base: issuer ? pathToFileURL(npath.fromPortablePath(issuer)) : null,
+        conditions,
+      });
 
-    if (typeof resolvedExport === `string`)
-      return ppath.join(packageLocation, resolvedExport as PortablePath);
-
-    return null;
+      return npath.toPortablePath(fileURLToPath(resolvedExport));
+    } catch (error) {
+      throw makeError(
+        ErrorCode.EXPORTS_RESOLUTION_FAILED,
+        error.message,
+        {unqualifiedPath: getPathForDisplay(unqualifiedPath), locator, pkgJson, subpath: getPathForDisplay(subpath), conditions},
+        error.code,
+      );
+    }
   }
 
   /**
@@ -253,7 +267,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     try {
       candidates.push(unqualifiedPath);
       stat = opts.fakeFs.statSync(unqualifiedPath);
-    } catch (error) {}
+    } catch {}
 
     // If the file exists and is a file, we can stop right there
 
@@ -267,7 +281,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
 
       try {
         pkgJson = JSON.parse(opts.fakeFs.readFileSync(ppath.join(unqualifiedPath, Filename.manifest), `utf8`));
-      } catch (error) {}
+      } catch {}
 
       let nextUnqualifiedPath;
 
@@ -335,7 +349,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
 
   function callNativeResolution(request: PortablePath, issuer: PortablePath): NativePath | false {
     if (issuer.endsWith(`/`))
-      issuer = ppath.join(issuer, `internal.js` as Filename);
+      issuer = ppath.join(issuer, `internal.js`);
 
     // Since we would need to create a fake module anyway (to call _resolveLookupPath that
     // would give us the paths to give to _resolveFilename), we can as well not use
@@ -497,24 +511,29 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     if (!relativeLocation.endsWith(`/`))
       relativeLocation = `${relativeLocation}/` as PortablePath;
 
-    let from = 0;
+    do {
+      const entry = packageLocatorsByLocations.get(relativeLocation);
 
-    // If someone wants to use a binary search to go from O(n) to O(log n), be my guest
-    while (from < packageLocationLengths.length && packageLocationLengths[from] > relativeLocation.length)
-      from += 1;
-
-    for (let t = from; t < packageLocationLengths.length; ++t) {
-      const entry = packageLocatorsByLocations.get(relativeLocation.substr(0, packageLocationLengths[t]) as PortablePath);
-
-      if (typeof entry !== `undefined`) {
-        if (entry.discardFromLookup && !includeDiscardFromLookup)
-          continue;
-
-        return entry.locator;
+      if (typeof entry === `undefined` || (entry.discardFromLookup && !includeDiscardFromLookup)) {
+        relativeLocation = relativeLocation.substring(0, relativeLocation.lastIndexOf(`/`, relativeLocation.length - 2) + 1) as PortablePath;
+        continue;
       }
-    }
+
+      return entry.locator;
+    } while (relativeLocation !== ``);
 
     return null;
+  }
+
+  function tryReadFile(filePath: NativePath) {
+    try {
+      return opts.fakeFs.readFileSync(npath.toPortablePath(filePath), `utf8`);
+    } catch (err) {
+      if (err.code === `ENOENT`)
+        return undefined;
+
+      throw err;
+    }
   }
 
   /**
@@ -530,12 +549,15 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
    */
 
   function resolveToUnqualified(request: PortablePath, issuer: PortablePath | null, {considerBuiltins = true}: ResolveToUnqualifiedOptions = {}): PortablePath | null {
+    if (request.startsWith(`#`))
+      throw new Error(`resolveToUnqualified can not handle private import mappings`);
+
     // The 'pnpapi' request is reserved and will always return the path to the PnP file, from everywhere
     if (request === `pnpapi`)
       return npath.toPortablePath(opts.pnpapiResolution);
 
     // Bailout if the request is a native module
-    if (considerBuiltins && builtinModules.has(request))
+    if (considerBuiltins && isBuiltin(request))
       return null;
 
     const requestForDisplay = getPathForDisplay(request);
@@ -704,7 +726,7 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
           }
         }
       } else if (dependencyReference === undefined) {
-        if (!considerBuiltins && builtinModules.has(request)) {
+        if (!considerBuiltins && isBuiltin(request)) {
           if (isDependencyTreeRoot(issuerLocator)) {
             error = makeError(
               ErrorCode.UNDECLARED_DEPENDENCY,
@@ -784,12 +806,12 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     return ppath.normalize(unqualifiedPath);
   }
 
-  function resolveUnqualifiedExport(request: PortablePath, unqualifiedPath: PortablePath) {
+  function resolveUnqualifiedExport(request: PortablePath, unqualifiedPath: PortablePath, conditions: Set<string> = defaultExportsConditions, issuer: PortablePath | null) {
     // "exports" only apply when requiring a package, not when requiring via an absolute / relative path
     if (isStrictRegExp.test(request))
       return unqualifiedPath;
 
-    const unqualifiedExportPath = applyNodeExportsResolution(unqualifiedPath);
+    const unqualifiedExportPath = applyNodeExportsResolution(unqualifiedPath, conditions, issuer);
     if (unqualifiedExportPath) {
       return ppath.normalize(unqualifiedExportPath);
     } else {
@@ -809,12 +831,67 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
     if (qualifiedPath) {
       return ppath.normalize(qualifiedPath);
     } else {
+      nodeUtils.reportRequiredFilesToWatchMode(candidates.map(candidate => npath.fromPortablePath(candidate)));
+
       const unqualifiedPathForDisplay = getPathForDisplay(unqualifiedPath);
+
+      const containingPackage = findPackageLocator(unqualifiedPath);
+      if (containingPackage) {
+        const {packageLocation} = getPackageInformationSafe(containingPackage);
+
+        let exists = true;
+        try {
+          opts.fakeFs.accessSync(packageLocation);
+        } catch (err) {
+          if (err?.code === `ENOENT`) {
+            exists = false;
+          } else {
+            const readableError: string = (err?.message ?? err ?? `empty exception thrown`).replace(/^[A-Z]/, ($0: string) => $0.toLowerCase());
+            throw makeError(ErrorCode.QUALIFIED_PATH_RESOLUTION_FAILED, `Required package exists but could not be accessed (${readableError}).\n\nMissing package: ${containingPackage.name}@${containingPackage.reference}\nExpected package location: ${getPathForDisplay(packageLocation)}\n`, {unqualifiedPath: unqualifiedPathForDisplay, extensions});
+          }
+        }
+
+        if (!exists) {
+          const errorMessage = packageLocation.includes(`/unplugged/`)
+            ? `Required unplugged package missing from disk. This may happen when switching branches without running installs (unplugged packages must be fully materialized on disk to work).`
+            : `Required package missing from disk. If you keep your packages inside your repository then restarting the Node process may be enough. Otherwise, try to run an install first.`;
+
+          throw makeError(
+            ErrorCode.QUALIFIED_PATH_RESOLUTION_FAILED,
+            `${errorMessage}\n\nMissing package: ${containingPackage.name}@${containingPackage.reference}\nExpected package location: ${getPathForDisplay(packageLocation)}\n`,
+            {unqualifiedPath: unqualifiedPathForDisplay, extensions},
+          );
+        }
+      }
+
       throw makeError(
         ErrorCode.QUALIFIED_PATH_RESOLUTION_FAILED,
-        `Qualified path resolution failed - none of those files can be found on the disk.\n\nSource path: ${unqualifiedPathForDisplay}\n${candidates.map(candidate => `Not found: ${getPathForDisplay(candidate)}\n`).join(``)}`,
-        {unqualifiedPath: unqualifiedPathForDisplay},
+        `Qualified path resolution failed: we looked for the following paths, but none could be accessed.\n\nSource path: ${unqualifiedPathForDisplay}\n${candidates.map(candidate => `Not found: ${getPathForDisplay(candidate)}\n`).join(``)}`,
+        {unqualifiedPath: unqualifiedPathForDisplay, extensions},
       );
+    }
+  }
+
+  function resolvePrivateRequest(request: PortablePath, issuer: PortablePath | null, opts: ResolveRequestOptions) {
+    if (!issuer)
+      throw new Error(`Assertion failed: An issuer is required to resolve private import mappings`);
+
+    const resolved = packageImportsResolve({
+      name: request,
+      base: pathToFileURL(npath.fromPortablePath(issuer)),
+      conditions: opts.conditions ?? defaultExportsConditions,
+      readFileSyncFn: tryReadFile,
+    });
+
+    if (resolved instanceof URL) {
+      return resolveUnqualified(npath.toPortablePath(fileURLToPath(resolved)), {extensions: opts.extensions});
+    } else {
+      if (resolved.startsWith(`#`))
+        // Node behaves interestingly by default so just block the request for now.
+        // https://github.com/nodejs/node/issues/40579
+        throw new Error(`Mapping from one private import to another isn't allowed`);
+
+      return resolveRequest(resolved as PortablePath, issuer, opts);
     }
   }
 
@@ -826,27 +903,39 @@ export function makeApi(runtimeState: RuntimeState, opts: MakeApiOptions): PnpAp
    * imports won't be computed correctly (they'll get resolved relative to "/tmp/" instead of "/tmp/foo/").
    */
 
-  function resolveRequest(request: PortablePath, issuer: PortablePath | null, {considerBuiltins, extensions}: ResolveRequestOptions = {}): PortablePath | null {
-    const unqualifiedPath = resolveToUnqualified(request, issuer, {considerBuiltins});
-    if (unqualifiedPath === null)
-      return null;
-
-    const isIssuerIgnored = () =>
-      issuer !== null
-        ? isPathIgnored(issuer)
-        : false;
-
-    const remappedPath = (!considerBuiltins || !builtinModules.has(request)) && !isIssuerIgnored()
-      ? resolveUnqualifiedExport(request, unqualifiedPath)
-      : unqualifiedPath;
-
+  function resolveRequest(request: PortablePath, issuer: PortablePath | null, opts: ResolveRequestOptions = {}): PortablePath | null {
     try {
-      return resolveUnqualified(remappedPath, {extensions});
-    } catch (resolutionError) {
-      if (resolutionError.pnpCode === `QUALIFIED_PATH_RESOLUTION_FAILED`)
-        Object.assign(resolutionError.data, {request: getPathForDisplay(request), issuer: issuer && getPathForDisplay(issuer)});
+      if (request.startsWith(`#`))
+        return resolvePrivateRequest(request, issuer, opts);
 
-      throw resolutionError;
+      const {considerBuiltins, extensions, conditions} = opts;
+
+      const unqualifiedPath = resolveToUnqualified(request, issuer, {considerBuiltins});
+
+      // If the request is the pnpapi, we can just return the unqualifiedPath
+      // without having to apply the exports resolution or the extension resolution
+      // (opts.pnpapiResolution is always a full path - makeManager enforces this by stat-ing it)
+      if (request === `pnpapi`)
+        return unqualifiedPath;
+
+      if (unqualifiedPath === null)
+        return null;
+
+      const isIssuerIgnored = () =>
+        issuer !== null
+          ? isPathIgnored(issuer)
+          : false;
+
+      const remappedPath = (!considerBuiltins || !isBuiltin(request)) && !isIssuerIgnored()
+        ? resolveUnqualifiedExport(request, unqualifiedPath, conditions, issuer)
+        : unqualifiedPath;
+
+      return resolveUnqualified(remappedPath, {extensions});
+    } catch (error) {
+      if (Object.hasOwn(error, `pnpCode`))
+        Object.assign(error.data, {request: getPathForDisplay(request), issuer: issuer && getPathForDisplay(issuer)});
+
+      throw error;
     }
   }
 
